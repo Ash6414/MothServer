@@ -1,14 +1,14 @@
 # Bat Node System v2
 
-FastAPI/SQLite ingest server, Streamlit dashboard, ESP32 skeleton, and AudioMoth UART/SD arbitration notes for the bat acoustic monitoring node system.
+FastAPI/SQLite ingest server, Streamlit dashboard, ESP32 bridge firmware support, and AudioMoth UART/SD arbitration notes for the bat acoustic monitoring node system.
 
 ## Repository layout
 
 ```text
 bat_node_system/
   server/
-    bat_server.py              # Original v2 secure ingest server. Preserved.
-    bat_server_contract.py     # Current ESP32-WROOM-U upload-contract adapter.
+    bat_server.py              # Current secure ingest server used by ESP32 bridge firmware.
+    bat_server_contract.py     # Legacy raw-query upload adapter kept for older ESP sketches.
     manage_node.py             # Node credential helper.
     test_contract_upload.py    # Contract/HMAC/upload validation tests.
     requirements.txt
@@ -28,12 +28,15 @@ POST /v1/device/heartbeat
 POST /v1/device/time_check
 GET  /v1/device/{node_id}/commands
 POST /v1/device/{node_id}/commands/{command_id}/ack
-POST /v1/device/{node_id}/upload/start
-POST /v1/device/{node_id}/upload/chunk?node_id=BATNODE_001&path=20260608_220530.WAV&offset=0&length=512&total=352044&crc32=ABCD1234
-POST /v1/device/{node_id}/upload/finish
+POST /v1/files/manifest
+POST /v1/uploads/init
+PUT  /v1/uploads/{upload_id}/chunks/{chunk_index}
+POST /v1/uploads/{upload_id}/complete
+GET  /v1/nodes/{node_id}/delete_authorization?manifest_id=BATNODE_001-AUDIOMOTH-SD
+POST /v1/nodes/{node_id}/delete_confirm
 ```
 
-Use `server/bat_server_contract.py` for that firmware. It imports the original `bat_server.py`, preserves the older manifest/upload/delete endpoints, and adds the raw-binary ESP32 upload contract.
+Use `server/bat_server.py` for this firmware. The ESP asks `/v1/uploads/init` for a 512-byte chunk size so each AudioMoth UART `GET` response maps directly to one server chunk.
 
 ## HMAC canonical string
 
@@ -52,17 +55,17 @@ Canonical string:
 
 ```text
 METHOD
-PATH_OR_PATH_WITH_QUERY
+PATH
 TIMESTAMP
 NONCE
 BODY_SHA256
 ```
 
-Rules implemented in `bat_server_contract.py`:
+Rules implemented in `bat_server.py`:
 
 - JSON endpoints sign `request.url.path`.
-- Binary chunk endpoint signs `request.url.path + "?" + request.url.query` exactly.
-- Query parameters are not sorted or reconstructed.
+- Binary chunk endpoints also sign `request.url.path`.
+- Query parameters are not included in the HMAC canonical string.
 - Body hash is lowercase SHA-256 of the exact raw body bytes.
 - HMAC key is the literal UTF-8 `DEVICE_SECRET` string.
 - Timestamp drift, duplicate nonce, bad body hash, bad node/key, and bad signature are rejected.
@@ -88,13 +91,13 @@ Copy the printed `NODE_ID`, `KEY_ID`, and `DEVICE_SECRET` into the ESP32 sketch.
 Run the current ESP32 contract server:
 
 ```powershell
-uvicorn bat_server_contract:app --host 0.0.0.0 --port 8000
+uvicorn bat_server:app --host 0.0.0.0 --port 8000
 ```
 
-Older manifest/chunk firmware can still run directly against the original server:
+Older raw-query ESP sketches can still run against the legacy adapter:
 
 ```powershell
-uvicorn bat_server:app --host 0.0.0.0 --port 8000
+uvicorn bat_server_contract:app --host 0.0.0.0 --port 8000
 ```
 
 ## Linux/Raspberry Pi setup
@@ -105,7 +108,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python manage_node.py create BATNODE_001 "Bench Node 1"
-uvicorn bat_server_contract:app --host 0.0.0.0 --port 8000
+uvicorn bat_server:app --host 0.0.0.0 --port 8000
 ```
 
 ## Environment variables
@@ -113,17 +116,14 @@ uvicorn bat_server_contract:app --host 0.0.0.0 --port 8000
 ```text
 BAT_DB_PATH=bat_nodes_v2.db
 BAT_DATA_DIR=data
-BAT_UPLOAD_ROOT=data/uploads
-AUTH_WINDOW_SECONDS=900
-AUTH_NONCE_RETENTION_SECONDS=3600
-MOTH_NODE_ID=BATNODE_001
-MOTH_KEY_ID=key-1
-MOTH_DEVICE_SECRET=REPLACE_WITH_64_HEX_OR_SERVER_SECRET
+AUTH_WINDOW_SECONDS=300
 DASHBOARD_USER=admin
 DASHBOARD_PASSWORD=change-me-now
+REQUIRE_FLAC_BEFORE_DELETE=0
+REQUIRE_BACKUP_BEFORE_DELETE=0
 ```
 
-`MOTH_*` variables provide a bench fallback credential only. Production nodes should use `manage_node.py` and unique secrets.
+Production nodes should use `manage_node.py` and unique secrets.
 
 ## Dashboard
 
@@ -149,25 +149,25 @@ The tests verify:
 
 1. `/v1/public/server_time` returns `epoch_utc`.
 2. HMAC verification works for JSON heartbeat.
-3. HMAC verification works for raw binary upload chunks with the exact query string.
-4. Start → chunk → finish produces a final `.WAV` file.
-5. Bad CRC returns non-2xx.
-6. Bad signature returns 401/403.
-7. Path traversal like `../bad.WAV` is rejected.
+3. Manifest -> init -> PUT chunks -> complete stores and parses a `.WAV` file.
+4. Upload init honors the ESP bridge chunk size.
+5. Delete authorization and delete confirm work after server verification.
+6. Bad signature returns 401.
+7. Duplicate nonce replay returns 401.
 
 ## Delete policy
 
-The ESP32 deletes AudioMoth files only after `/v1/device/{node_id}/upload/finish` returns 2xx.
+The ESP32 deletes AudioMoth files only after `/v1/uploads/{upload_id}/complete` verifies the WAV and `/v1/nodes/{node_id}/delete_authorization` explicitly lists the file as safe to delete.
 
-The contract finish endpoint:
+The upload complete endpoint:
 
 - verifies upload session state
 - verifies byte count
 - verifies final `.part` file size
-- atomically moves the file into `data/uploads/{node_id}/recordings/`
+- atomically moves the file into `data/original_wav/{node_id}/`
 - computes server SHA-256
-- writes `recordings` metadata
-- updates the legacy `files` table for dashboard compatibility
-- returns 2xx only after the file is committed
+- parses WAV metadata
+- updates the `files` table for dashboard/delete authorization
+- returns `ok: true` only after the server copy is verified
 
-Weather lookup is intentionally not blocking upload finish. Filename timestamps such as `YYYYMMDD_HHMMSS.WAV` and `YYYYMMDD/YYYYMMDD_HHMMSS.WAV` are parsed into `recordings.recording_epoch`, and `weather_status` starts as `pending`.
+FLAC conversion is attempted when `ffmpeg` is available, but it does not block delete authorization unless `REQUIRE_FLAC_BEFORE_DELETE=1`.
