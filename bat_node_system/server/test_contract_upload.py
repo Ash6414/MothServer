@@ -166,6 +166,16 @@ def test_manifest_init_chunk_complete_and_delete_authorization(tmp_path: Path):
     assert resume_json["next_missing_offset"] == 512
     assert resume_json["received_chunk_count"] == 1
 
+    status_path = f"/v1/uploads/{upload_id}/status"
+    status = client.get(status_path, headers=sign("GET", status_path))
+    assert status.status_code == 200
+    status_json = status.json()
+    assert status_json["next_missing_chunk"] == 1
+    assert status_json["next_missing_offset"] == 512
+    assert status_json["received_chunk_count"] == 1
+    assert "received_chunks" not in status_json
+    assert "missing_chunks" not in status_json
+
     for index, start in enumerate(range(512, len(wav_bytes), 512), start=1):
         body = wav_bytes[start : start + 512]
         path = f"/v1/uploads/{upload_id}/chunks/{index}"
