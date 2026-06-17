@@ -20,6 +20,7 @@ import os
 import sqlite3
 import time
 import json
+import html
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -720,13 +721,23 @@ def page_nodes(nodes: pd.DataFrame) -> None:
 def page_map(nodes: pd.DataFrame) -> None:
     st.header("Map")
     mapped = nodes.dropna(subset=["location_lat", "location_lon"]).copy()
+    if not mapped.empty:
+        mapped["location_lat"] = pd.to_numeric(mapped["location_lat"], errors="coerce")
+        mapped["location_lon"] = pd.to_numeric(mapped["location_lon"], errors="coerce")
+        mapped = mapped.dropna(subset=["location_lat", "location_lon"])
+        mapped = mapped[
+            mapped["location_lat"].between(-90, 90)
+            & mapped["location_lon"].between(-180, 180)
+        ].copy()
+
     if mapped.empty:
         st.info("No node coordinates saved yet. Add latitude and longitude in the Nodes page.")
         return
 
     if FOLIUM_AVAILABLE:
         center = [float(mapped["location_lat"].mean()), float(mapped["location_lon"].mean())]
-        m = folium.Map(location=center, zoom_start=11, tiles=None)
+        zoom_start = 13 if len(mapped) == 1 else 11
+        m = folium.Map(location=center, zoom_start=zoom_start, tiles=None, prefer_canvas=True)
         folium.TileLayer(
             tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
             attr="Esri World Imagery",
@@ -737,7 +748,7 @@ def page_map(nodes: pd.DataFrame) -> None:
         folium.TileLayer("OpenStreetMap", name="Street map", control=True).add_to(m)
 
         for _, r in mapped.iterrows():
-            status = r.get("status", "unknown")
+            status = str(r.get("status") or "unknown")
             color = "green"
             if status == "CRITICAL BATTERY":
                 color = "red"
@@ -749,22 +760,37 @@ def page_map(nodes: pd.DataFrame) -> None:
                 color = "blue"
             elif status == "CHARGING":
                 color = "orange"
+            node_label = html.escape(str(r.get("node_name") or r.get("node_id") or "Node"))
+            node_id = html.escape(str(r.get("node_id") or ""))
+            location_label = html.escape(str(r.get("location_label") or ""))
+            battery = "" if pd.isna(r.get("battery_v")) else html.escape(str(r.get("battery_v")))
+            last_seen = html.escape(str(r.get("last_seen_age") or ""))
+            safe_status = html.escape(status)
             popup = (
-                f"<b>{r.get('node_name') or r.get('node_id')}</b><br>"
-                f"ID: {r.get('node_id')}<br>"
-                f"Status: {status}<br>"
-                f"Battery: {r.get('battery_v')} V<br>"
-                f"Last seen: {r.get('last_seen_age')}<br>"
-                f"Location: {r.get('location_label') or ''}"
+                f"<b>{node_label}</b><br>"
+                f"ID: {node_id}<br>"
+                f"Status: {safe_status}<br>"
+                f"Battery: {battery} V<br>"
+                f"Last seen: {last_seen}<br>"
+                f"Location: {location_label}"
             )
             folium.Marker(
                 location=[float(r["location_lat"]), float(r["location_lon"])],
                 popup=popup,
-                tooltip=f"{r.get('node_name') or r.get('node_id')} — {status}",
+                tooltip=f"{node_label} - {safe_status}",
                 icon=folium.Icon(color=color, icon="info-sign"),
             ).add_to(m)
-        folium.LayerControl().add_to(m)
-        st_folium(m, height=650, width="stretch")
+        if len(mapped) > 1:
+            bounds = mapped[["location_lat", "location_lon"]].astype(float).values.tolist()
+            m.fit_bounds(bounds, padding=(30, 30))
+        folium.LayerControl(collapsed=False).add_to(m)
+        st_folium(
+            m,
+            key="bat_node_map",
+            height=650,
+            use_container_width=True,
+            returned_objects=[],
+        )
     else:
         st.warning("Install folium and streamlit-folium for satellite map support. Falling back to Streamlit map.")
         st.map(mapped.rename(columns={"location_lat": "lat", "location_lon": "lon"})[["lat", "lon"]])
