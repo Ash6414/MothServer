@@ -1,0 +1,152 @@
+name: Apply dashboard map stability patch
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/apply-dashboard-map-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-dashboard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Patch Streamlit map rendering
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('bat_node_system/dashboard/bat_dashboard_app.py')
+          text = path.read_text(encoding='utf-8')
+
+          if 'import html\n' not in text:
+              text = text.replace('import json\n', 'import json\nimport html\n', 1)
+
+          coord_anchor = '    mapped = nodes.dropna(subset=["location_lat", "location_lon"]).copy()\n'
+          coord_block = ''.join([
+              coord_anchor,
+              '    if not mapped.empty:\n',
+              '        mapped["location_lat"] = pd.to_numeric(mapped["location_lat"], errors="coerce")\n',
+              '        mapped["location_lon"] = pd.to_numeric(mapped["location_lon"], errors="coerce")\n',
+              '        mapped = mapped.dropna(subset=["location_lat", "location_lon"])\n',
+              '        mapped = mapped[\n',
+              '            mapped["location_lat"].between(-90, 90)\n',
+              '            & mapped["location_lon"].between(-180, 180)\n',
+              '        ].copy()\n',
+              '\n',
+          ])
+          if 'pd.to_numeric(mapped["location_lat"]' not in text:
+              text = text.replace(coord_anchor, coord_block, 1)
+
+          old_map = '        m = folium.Map(location=center, zoom_start=11, tiles=None)\n'
+          new_map = ''.join([
+              '        zoom_start = 13 if len(mapped) == 1 else 11\n',
+              '        m = folium.Map(location=center, zoom_start=zoom_start, tiles=None, prefer_canvas=True)\n',
+          ])
+          text = text.replace(old_map, new_map, 1)
+          text = text.replace('            status = r.get("status", "unknown")\n', '            status = str(r.get("status") or "unknown")\n', 1)
+
+          color_anchor = ''.join([
+              '            elif status == "CHARGING":\n',
+              '                color = "orange"\n',
+          ])
+          safe_vars = color_anchor + ''.join([
+              '            node_label = html.escape(str(r.get("node_name") or r.get("node_id") or "Node"))\n',
+              '            node_id = html.escape(str(r.get("node_id") or ""))\n',
+              '            location_label = html.escape(str(r.get("location_label") or ""))\n',
+              '            battery = "" if pd.isna(r.get("battery_v")) else html.escape(str(r.get("battery_v")))\n',
+              '            last_seen = html.escape(str(r.get("last_seen_age") or ""))\n',
+              '            safe_status = html.escape(status)\n',
+          ])
+          if 'node_label = html.escape' not in text:
+              text = text.replace(color_anchor, safe_vars, 1)
+
+          old_popup = ''.join([
+              '            popup = (\n',
+              '                f"<b>{r.get(\'node_name\') or r.get(\'node_id\')}</b><br>"\n',
+              '                f"ID: {r.get(\'node_id\')}<br>"\n',
+              '                f"Status: {status}<br>"\n',
+              '                f"Battery: {r.get(\'battery_v\')} V<br>"\n',
+              '                f"Last seen: {r.get(\'last_seen_age\')}<br>"\n',
+              '                f"Location: {r.get(\'location_label\') or \'\'}"\n',
+              '            )\n',
+          ])
+          new_popup = ''.join([
+              '            popup = (\n',
+              '                f"<b>{node_label}</b><br>"\n',
+              '                f"ID: {node_id}<br>"\n',
+              '                f"Status: {safe_status}<br>"\n',
+              '                f"Battery: {battery} V<br>"\n',
+              '                f"Last seen: {last_seen}<br>"\n',
+              '                f"Location: {location_label}"\n',
+              '            )\n',
+          ])
+          text = text.replace(old_popup, new_popup, 1)
+
+          lines = []
+          for line in text.splitlines(keepends=True):
+              if 'tooltip=f"{r.get(' in line:
+                  lines.append('                tooltip=f"{node_label} - {safe_status}",\n')
+              else:
+                  lines.append(line)
+          text = ''.join(lines)
+
+          old_component = ''.join([
+              '        folium.LayerControl().add_to(m)\n',
+              '        st_folium(m, height=650, width="stretch")\n',
+          ])
+          new_component = ''.join([
+              '        if len(mapped) > 1:\n',
+              '            bounds = mapped[["location_lat", "location_lon"]].astype(float).values.tolist()\n',
+              '            m.fit_bounds(bounds, padding=(30, 30))\n',
+              '        folium.LayerControl(collapsed=False).add_to(m)\n',
+              '        st_folium(\n',
+              '            m,\n',
+              '            key="bat_node_map",\n',
+              '            height=650,\n',
+              '            use_container_width=True,\n',
+              '            returned_objects=[],\n',
+              '        )\n',
+          ])
+          text = text.replace(old_component, new_component, 1)
+
+          required = [
+              'use_container_width=True',
+              'returned_objects=[]',
+              'key="bat_node_map"',
+              'pd.to_numeric(mapped["location_lat"]',
+              'm.fit_bounds(bounds, padding=(30, 30))',
+          ]
+          for needle in required:
+              if needle not in text:
+                  raise SystemExit(f'Map patch missing expected text: {needle}')
+          if 'st_folium(m, height=650, width="stretch")' in text:
+              raise SystemExit('Old unstable st_folium width call remains')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit dashboard patch if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- bat_node_system/dashboard/bat_dashboard_app.py; then
+            echo "dashboard map already patched"
+            exit 0
+          fi
+          git diff -- bat_node_system/dashboard/bat_dashboard_app.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bat_node_system/dashboard/bat_dashboard_app.py
+          git commit -m "Stabilize dashboard map rendering"
+          git push
