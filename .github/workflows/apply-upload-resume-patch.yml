@@ -1,0 +1,228 @@
+name: Apply upload resume server patch
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/apply-upload-resume-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-server:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Patch bat_server upload resume responses
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('bat_node_system/server/bat_server.py')
+          text = path.read_text(encoding='utf-8')
+
+          new_upload_init = r'''@app.post("/v1/uploads/init")
+async def upload_init(request: Request) -> Dict[str, Any]:
+    body = await request.body()
+    ident = await require_device_auth(request, body)
+    data = json.loads(body.decode("utf-8") or "{}")
+    node_id = ident["node_id"]
+    manifest_id = data.get("manifest_id")
+    filename = sanitize_filename(str(data.get("filename", "")))
+    file_size = int(data.get("file_size_bytes") or 0)
+    local_file_id = data.get("local_file_id")
+    requested_chunk_size = int(data.get("chunk_size") or DEFAULT_CHUNK_SIZE)
+    if file_size <= 0:
+        raise HTTPException(status_code=400, detail="file_size_bytes required")
+    if requested_chunk_size <= 0 or requested_chunk_size > MAX_CHUNK_SIZE:
+        raise HTTPException(status_code=400, detail="Bad chunk_size")
+
+    t = now_epoch()
+    with db_connect() as conn:
+        if local_file_id is not None:
+            f = conn.execute(
+                """
+                SELECT * FROM files
+                WHERE node_id=? AND manifest_id=? AND local_file_id=?
+                """,
+                (node_id, manifest_id, local_file_id),
+            ).fetchone()
+        else:
+            f = conn.execute(
+                """
+                SELECT * FROM files
+                WHERE node_id=? AND manifest_id=? AND filename=? AND file_size_bytes=?
+                """,
+                (node_id, manifest_id, filename, file_size),
+            ).fetchone()
+        if not f:
+            raise HTTPException(status_code=404, detail="File is not in manifest")
+        if int(f["file_size_bytes"]) != file_size:
+            raise HTTPException(status_code=400, detail="File size mismatch")
+        if f["upload_status"] in ("SERVER_COPY_VERIFIED", "SAFE_TO_DELETE", "DELETED_FROM_SD"):
+            return {
+                "ok": True,
+                "already_complete": True,
+                "file_id": f["id"],
+                "upload_status": f["upload_status"],
+            }
+
+        existing = conn.execute(
+            """
+            SELECT * FROM upload_sessions
+            WHERE file_id=? AND status IN ('OPEN', 'PARTIAL')
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (f["id"],),
+        ).fetchone()
+        if existing and int(existing["chunk_size"]) == requested_chunk_size:
+            upload_id = existing["upload_id"]
+            chunk_size = int(existing["chunk_size"])
+            total_chunks = int(existing["total_chunks"])
+        else:
+            if existing:
+                conn.execute(
+                    "UPDATE upload_sessions SET status='SUPERSEDED', updated_at=? WHERE upload_id=?",
+                    (t, existing["upload_id"]),
+                )
+            upload_id = "UPL_" + uuid.uuid4().hex
+            chunk_size = min(requested_chunk_size, MAX_CHUNK_SIZE)
+            total_chunks = math.ceil(file_size / chunk_size)
+            node_dir = safe_join(INCOMING_DIR, node_id)
+            node_dir.mkdir(parents=True, exist_ok=True)
+            temp_path = safe_join(node_dir, upload_id + ".part")
+            with temp_path.open("wb") as out:
+                out.truncate(file_size)
+            conn.execute(
+                """
+                INSERT INTO upload_sessions (
+                    upload_id, file_id, node_id, status, chunk_size, total_chunks,
+                    bytes_received, temp_path, started_at, updated_at
+                ) VALUES (?, ?, ?, 'OPEN', ?, ?, 0, ?, ?, ?)
+                """,
+                (upload_id, f["id"], node_id, chunk_size, total_chunks, str(temp_path), t, t),
+            )
+            conn.execute(
+                "UPDATE files SET upload_status='UPLOADING', updated_at=? WHERE id=?",
+                (t, f["id"]),
+            )
+        chunks = conn.execute(
+            "SELECT chunk_index FROM upload_chunks WHERE upload_id=? ORDER BY chunk_index",
+            (upload_id,),
+        ).fetchall()
+        received_chunks = [int(c["chunk_index"]) for c in chunks]
+        conn.commit()
+
+    received_set = set(received_chunks)
+    next_missing_chunk = total_chunks
+    for chunk_index in range(total_chunks):
+        if chunk_index not in received_set:
+            next_missing_chunk = chunk_index
+            break
+    next_missing_offset = min(next_missing_chunk * chunk_size, file_size)
+
+    return {
+        "ok": True,
+        "already_complete": False,
+        "upload_id": upload_id,
+        "file_id": f["id"],
+        "chunk_size": chunk_size,
+        "total_chunks": total_chunks,
+        "next_missing_chunk": next_missing_chunk,
+        "next_missing_offset": next_missing_offset,
+        "received_chunk_count": len(received_chunks),
+    }
+'''
+
+          new_upload_status = r'''@app.get("/v1/uploads/{upload_id}/status")
+async def upload_status(upload_id: str, request: Request) -> Dict[str, Any]:
+    body = await request.body()
+    ident = await require_device_auth(request, body)
+    node_id = ident["node_id"]
+    with db_connect() as conn:
+        s = conn.execute(
+            """
+            SELECT s.*, f.file_size_bytes
+            FROM upload_sessions s
+            JOIN files f ON f.id = s.file_id
+            WHERE s.upload_id=? AND s.node_id=?
+            """,
+            (upload_id, node_id),
+        ).fetchone()
+        if not s:
+            raise HTTPException(status_code=404, detail="Upload session not found")
+        chunks = conn.execute(
+            "SELECT chunk_index FROM upload_chunks WHERE upload_id=? ORDER BY chunk_index",
+            (upload_id,),
+        ).fetchall()
+    received = {int(c["chunk_index"]) for c in chunks}
+    missing = [i for i in range(int(s["total_chunks"])) if i not in received]
+    next_missing_chunk = missing[0] if missing else int(s["total_chunks"])
+    next_missing_offset = min(next_missing_chunk * int(s["chunk_size"]), int(s["file_size_bytes"]))
+    return {
+        "ok": True,
+        "upload_id": upload_id,
+        "status": s["status"],
+        "bytes_received": s["bytes_received"],
+        "total_chunks": s["total_chunks"],
+        "chunk_size": s["chunk_size"],
+        "next_missing_chunk": next_missing_chunk,
+        "next_missing_offset": next_missing_offset,
+        "received_chunk_count": len(received),
+    }
+'''
+
+          def replace_between(source: str, start_marker: str, end_marker: str, replacement: str) -> str:
+              start = source.find(start_marker)
+              if start < 0:
+                  raise SystemExit(f'Missing start marker: {start_marker}')
+              end = source.find(end_marker, start)
+              if end < 0:
+                  raise SystemExit(f'Missing end marker: {end_marker}')
+              return source[:start] + replacement + '\n\n' + source[end:]
+
+          text = replace_between(
+              text,
+              '@app.post("/v1/uploads/init")',
+              '@app.put("/v1/uploads/{upload_id}/chunks/{chunk_index}")',
+              new_upload_init,
+          )
+          text = replace_between(
+              text,
+              '@app.get("/v1/uploads/{upload_id}/status")',
+              'def parse_wav(path: Path)',
+              new_upload_status,
+          )
+
+          if 'already_received_chunks' in text:
+              raise SystemExit('Old already_received_chunks response is still present')
+          if '"received_chunk_count": len(received_chunks)' not in text:
+              raise SystemExit('upload_init resume count was not applied')
+          if '"received_chunk_count": len(received)' not in text:
+              raise SystemExit('upload_status resume count was not applied')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit server patch if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- bat_node_system/server/bat_server.py; then
+            echo "bat_server.py already patched"
+            exit 0
+          fi
+          git diff -- bat_node_system/server/bat_server.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bat_node_system/server/bat_server.py
+          git commit -m "Use compact upload resume metadata"
+          git push
