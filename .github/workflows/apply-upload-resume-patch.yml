@@ -24,161 +24,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 <<'PY'
+          import base64
           from pathlib import Path
 
           path = Path('bat_node_system/server/bat_server.py')
           text = path.read_text(encoding='utf-8')
 
-          new_upload_init = r'''@app.post("/v1/uploads/init")
-async def upload_init(request: Request) -> Dict[str, Any]:
-    body = await request.body()
-    ident = await require_device_auth(request, body)
-    data = json.loads(body.decode("utf-8") or "{}")
-    node_id = ident["node_id"]
-    manifest_id = data.get("manifest_id")
-    filename = sanitize_filename(str(data.get("filename", "")))
-    file_size = int(data.get("file_size_bytes") or 0)
-    local_file_id = data.get("local_file_id")
-    requested_chunk_size = int(data.get("chunk_size") or DEFAULT_CHUNK_SIZE)
-    if file_size <= 0:
-        raise HTTPException(status_code=400, detail="file_size_bytes required")
-    if requested_chunk_size <= 0 or requested_chunk_size > MAX_CHUNK_SIZE:
-        raise HTTPException(status_code=400, detail="Bad chunk_size")
+          upload_init_b64 = "QGFwcC5wb3N0KCIvdjEvdXBsb2Fkcy9pbml0IikKYXN5bmMgZGVmIHVwbG9hZF9pbml0KHJlcXVlc3Q6IFJlcXVlc3QpIC0+IERpY3Rbc3RyLCBBbnldOgogICAgYm9keSA9IGF3YWl0IHJlcXVlc3QuYm9keSgpCiAgICBpZGVudCA9IGF3YWl0IHJlcXVpcmVfZGV2aWNlX2F1dGgocmVxdWVzdCwgYm9keSkKICAgIGRhdGEgPSBqc29uLmxvYWRzKGJvZHkuZGVjb2RlKCJ1dGYtOCIpIG9yICJ7fSIpCiAgICBub2RlX2lkID0gaWRlbnRbIm5vZGVfaWQiXQogICAgbWFuaWZlc3RfaWQgPSBkYXRhLmdldCgibWFuaWZlc3RfaWQiKQogICAgZmlsZW5hbWUgPSBzYW5pdGl6ZV9maWxlbmFtZShzdHIoZGF0YS5nZXQoImZpbGVuYW1lIiwgIiIpKSkKICAgIGZpbGVfc2l6ZSA9IGludChkYXRhLmdldCgiZmlsZV9zaXplX2J5dGVzIikgb3IgMCkKICAgIGxvY2FsX2ZpbGVfaWQgPSBkYXRhLmdldCgibG9jYWxfZmlsZV9pZCIpCiAgICByZXF1ZXN0ZWRfY2h1bmtfc2l6ZSA9IGludChkYXRhLmdldCgiY2h1bmtfc2l6ZSIpIG9yIERFRkFVTFRfQ0hVTktfU0laRSkKICAgIGlmIGZpbGVfc2l6ZSA8PSAwOgogICAgICAgIHJhaXNlIEhUVFBFeGNlcHRpb24oc3RhdHVzX2NvZGU9NDAwLCBkZXRhaWw9ImZpbGVfc2l6ZV9ieXRlcyByZXF1aXJlZCIpCiAgICBpZiByZXF1ZXN0ZWRfY2h1bmtfc2l6ZSA8PSAwIG9yIHJlcXVlc3RlZF9jaHVua19zaXplID4gTUFYX0NIVU5LX1NJWkU6CiAgICAgICAgcmFpc2UgSFRUUEV4Y2VwdGlvbihzdGF0dXNfY29kZT00MDAsIGRldGFpbD0iQmFkIGNodW5rX3NpemUiKQoKICAgIHQgPSBub3dfZXBvY2goKQogICAgd2l0aCBkYl9jb25uZWN0KCkgYXMgY29ubjoKICAgICAgICBpZiBsb2NhbF9maWxlX2lkIGlzIG5vdCBOb25lOgogICAgICAgICAgICBmID0gY29ubi5leGVjdXRlKAogICAgICAgICAgICAgICAgIiIiCiAgICAgICAgICAgICAgICBTRUxFQ1QgKiBGUk9NIGZpbGVzCiAgICAgICAgICAgICAgICBXSEVSRSBub2RlX2lkPT8gQU5EIG1hbmlmZXN0X2lkPT8gQU5EIGxvY2FsX2ZpbGVfaWQ9PwogICAgICAgICAgICAgICAgIiIiLAogICAgICAgICAgICAgICAgKG5vZGVfaWQsIG1hbmlmZXN0X2lkLCBsb2NhbF9maWxlX2lkKSwKICAgICAgICAgICAgKS5mZXRjaG9uZSgpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgZiA9IGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgICAgICIiIgogICAgICAgICAgICAgICAgU0VMRUNUICogRlJPTSBmaWxlcwogICAgICAgICAgICAgICAgV0hFUkUgbm9kZV9pZD0/IEFORCBtYW5pZmVzdF9pZD0/IEFORCBmaWxlbmFtZT0/IEFORCBmaWxlX3NpemVfYnl0ZXM9PwogICAgICAgICAgICAgICAgIiIiLAogICAgICAgICAgICAgICAgKG5vZGVfaWQsIG1hbmlmZXN0X2lkLCBmaWxlbmFtZSwgZmlsZV9zaXplKSwKICAgICAgICAgICAgKS5mZXRjaG9uZSgpCiAgICAgICAgaWYgbm90IGY6CiAgICAgICAgICAgIHJhaXNlIEhUVFBFeGNlcHRpb24oc3RhdHVzX2NvZGU9NDA0LCBkZXRhaWw9IkZpbGUgaXMgbm90IGluIG1hbmlmZXN0IikKICAgICAgICBpZiBpbnQoZlsiZmlsZV9zaXplX2J5dGVzIl0pICE9IGZpbGVfc2l6ZToKICAgICAgICAgICAgcmFpc2UgSFRUUEV4Y2VwdGlvbihzdGF0dXNfY29kZT00MDAsIGRldGFpbD0iRmlsZSBzaXplIG1pc21hdGNoIikKICAgICAgICBpZiBmWyJ1cGxvYWRfc3RhdHVzIl0gaW4gKCJTRVJWRVJfQ09QWV9WRVJJRklFRCIsICJTQUZFX1RPX0RFTEVURSIsICJERUxFVEVEX0ZST01fU0QiKToKICAgICAgICAgICAgcmV0dXJuIHsKICAgICAgICAgICAgICAgICJvayI6IFRydWUsCiAgICAgICAgICAgICAgICAiYWxyZWFkeV9jb21wbGV0ZSI6IFRydWUsCiAgICAgICAgICAgICAgICAiZmlsZV9pZCI6IGZbImlkIl0sCiAgICAgICAgICAgICAgICAidXBsb2FkX3N0YXR1cyI6IGZbInVwbG9hZF9zdGF0dXMiXSwKICAgICAgICAgICAgfQoKICAgICAgICBleGlzdGluZyA9IGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgIiIiCiAgICAgICAgICAgIFNFTEVDVCAqIEZST00gdXBsb2FkX3Nlc3Npb25zCiAgICAgICAgICAgIFdIRVJFIGZpbGVfaWQ9PyBBTkQgc3RhdHVzIElOICgnT1BFTicsICdQQVJUSUFMJykKICAgICAgICAgICAgT1JERVIgQlkgc3RhcnRlZF9hdCBERVNDIExJTUlUIDEKICAgICAgICAgICAgIiIiLAogICAgICAgICAgICAoZlsiaWQiXSwpLAogICAgICAgICkuZmV0Y2hvbmUoKQogICAgICAgIGlmIGV4aXN0aW5nIGFuZCBpbnQoZXhpc3RpbmdbImNodW5rX3NpemUiXSkgPT0gcmVxdWVzdGVkX2NodW5rX3NpemU6CiAgICAgICAgICAgIHVwbG9hZF9pZCA9IGV4aXN0aW5nWyJ1cGxvYWRfaWQiXQogICAgICAgICAgICBjaHVua19zaXplID0gaW50KGV4aXN0aW5nWyJjaHVua19zaXplIl0pCiAgICAgICAgICAgIHRvdGFsX2NodW5rcyA9IGludChleGlzdGluZ1sidG90YWxfY2h1bmtzIl0pCiAgICAgICAgZWxzZToKICAgICAgICAgICAgaWYgZXhpc3Rpbmc6CiAgICAgICAgICAgICAgICBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICAgICAgICAgIlVQREFURSB1cGxvYWRfc2Vzc2lvbnMgU0VUIHN0YXR1cz0nU1VQRVJTRURFRCcsIHVwZGF0ZWRfYXQ9PyBXSEVSRSB1cGxvYWRfaWQ9PyIsCiAgICAgICAgICAgICAgICAgICAgKHQsIGV4aXN0aW5nWyJ1cGxvYWRfaWQiXSksCiAgICAgICAgICAgICAgICApCiAgICAgICAgICAgIHVwbG9hZF9pZCA9ICJVUExfIiArIHV1aWQudXVpZDQoKS5oZXgKICAgICAgICAgICAgY2h1bmtfc2l6ZSA9IG1pbihyZXF1ZXN0ZWRfY2h1bmtfc2l6ZSwgTUFYX0NIVU5LX1NJWkUpCiAgICAgICAgICAgIHRvdGFsX2NodW5rcyA9IG1hdGguY2VpbChmaWxlX3NpemUgLyBjaHVua19zaXplKQogICAgICAgICAgICBub2RlX2RpciA9IHNhZmVfam9pbihJTkNPTUlOR19ESVIsIG5vZGVfaWQpCiAgICAgICAgICAgIG5vZGVfZGlyLm1rZGlyKHBhcmVudHM9VHJ1ZSwgZXhpc3Rfb2s9VHJ1ZSkKICAgICAgICAgICAgdGVtcF9wYXRoID0gc2FmZV9qb2luKG5vZGVfZGlyLCB1cGxvYWRfaWQgKyAiLnBhcnQiKQogICAgICAgICAgICB3aXRoIHRlbXBfcGF0aC5vcGVuKCJ3YiIpIGFzIG91dDoKICAgICAgICAgICAgICAgIG91dC50cnVuY2F0ZShmaWxlX3NpemUpCiAgICAgICAgICAgIGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgICAgICIiIgogICAgICAgICAgICAgICAgSU5TRVJUIElOVE8gdXBsb2FkX3Nlc3Npb25zICgKICAgICAgICAgICAgICAgICAgICB1cGxvYWRfaWQsIGZpbGVfaWQsIG5vZGVfaWQsIHN0YXR1cywgY2h1bmtfc2l6ZSwgdG90YWxfY2h1bmtzLAogICAgICAgICAgICAgICAgICAgIGJ5dGVzX3JlY2VpdmVkLCB0ZW1wX3BhdGgsIHN0YXJ0ZWRfYXQsIHVwZGF0ZWRfYXQKICAgICAgICAgICAgICAgICkgVkFMVUVTICg/LCA/LCA/LCAnT1BFTicsID8sID8sIDAsID8sID8sID8pCiAgICAgICAgICAgICAgICAiIiIsCiAgICAgICAgICAgICAgICAodXBsb2FkX2lkLCBmWyJpZCJdLCBub2RlX2lkLCBjaHVua19zaXplLCB0b3RhbF9jaHVua3MsIHN0cih0ZW1wX3BhdGgpLCB0LCB0KSwKICAgICAgICAgICAgKQogICAgICAgICAgICBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICAgICAiVVBEQVRFIGZpbGVzIFNFVCB1cGxvYWRfc3RhdHVzPSdVUExPQURJTkcnLCB1cGRhdGVkX2F0PT8gV0hFUkUgaWQ9PyIsCiAgICAgICAgICAgICAgICAodCwgZlsiaWQiXSksCiAgICAgICAgICAgICkKICAgICAgICBjaHVua3MgPSBjb25uLmV4ZWN1dGUoCiAgICAgICAgICAgICJTRUxFQ1QgY2h1bmtfaW5kZXggRlJPTSB1cGxvYWRfY2h1bmtzIFdIRVJFIHVwbG9hZF9pZD0/IE9SREVSIEJZIGNodW5rX2luZGV4IiwKICAgICAgICAgICAgKHVwbG9hZF9pZCwpLAogICAgICAgICkuZmV0Y2hhbGwoKQogICAgICAgIHJlY2VpdmVkX2NodW5rcyA9IFtpbnQoY1siY2h1bmtfaW5kZXgiXSkgZm9yIGMgaW4gY2h1bmtzXQogICAgICAgIGNvbm4uY29tbWl0KCkKCiAgICByZWNlaXZlZF9zZXQgPSBzZXQocmVjZWl2ZWRfY2h1bmtzKQogICAgbmV4dF9taXNzaW5nX2NodW5rID0gdG90YWxfY2h1bmtzCiAgICBmb3IgY2h1bmtfaW5kZXggaW4gcmFuZ2UodG90YWxfY2h1bmtzKToKICAgICAgICBpZiBjaHVua19pbmRleCBub3QgaW4gcmVjZWl2ZWRfc2V0OgogICAgICAgICAgICBuZXh0X21pc3NpbmdfY2h1bmsgPSBjaHVua19pbmRleAogICAgICAgICAgICBicmVhawogICAgbmV4dF9taXNzaW5nX29mZnNldCA9IG1pbihuZXh0X21pc3NpbmdfY2h1bmsgKiBjaHVua19zaXplLCBmaWxlX3NpemUpCgogICAgcmV0dXJuIHsKICAgICAgICAib2siOiBUcnVlLAogICAgICAgICJhbHJlYWR5X2NvbXBsZXRlIjogRmFsc2UsCiAgICAgICAgInVwbG9hZF9pZCI6IHVwbG9hZF9pZCwKICAgICAgICAiZmlsZV9pZCI6IGZbImlkIl0sCiAgICAgICAgImNodW5rX3NpemUiOiBjaHVua19zaXplLAogICAgICAgICJ0b3RhbF9jaHVua3MiOiB0b3RhbF9jaHVua3MsCiAgICAgICAgIm5leHRfbWlzc2luZ19jaHVuayI6IG5leHRfbWlzc2luZ19jaHVuaywKICAgICAgICAibmV4dF9taXNzaW5nX29mZnNldCI6IG5leHRfbWlzc2luZ19vZmZzZXQsCiAgICAgICAgInJlY2VpdmVkX2NodW5rX2NvdW50IjogbGVuKHJlY2VpdmVkX2NodW5rcyksCiAgICB9Cgo="
+          upload_status_b64 = "QGFwcC5nZXQoIi92MS91cGxvYWRzL3t1cGxvYWRfaWR9L3N0YXR1cyIpCmFzeW5jIGRlZiB1cGxvYWRfc3RhdHVzKHVwbG9hZF9pZDogc3RyLCByZXF1ZXN0OiBSZXF1ZXN0KSAtPiBEaWN0W3N0ciwgQW55XToKICAgIGJvZHkgPSBhd2FpdCByZXF1ZXN0LmJvZHkoKQogICAgaWRlbnQgPSBhd2FpdCByZXF1aXJlX2RldmljZV9hdXRoKHJlcXVlc3QsIGJvZHkpCiAgICBub2RlX2lkID0gaWRlbnRbIm5vZGVfaWQiXQogICAgd2l0aCBkYl9jb25uZWN0KCkgYXMgY29ubjoKICAgICAgICBzID0gY29ubi5leGVjdXRlKAogICAgICAgICAgICAiIiIKICAgICAgICAgICAgU0VMRUNUIHMuKiwgZi5maWxlX3NpemVfYnl0ZXMKICAgICAgICAgICAgRlJPTSB1cGxvYWRfc2Vzc2lvbnMgcwogICAgICAgICAgICBKT0lOIGZpbGVzIGYgT04gZi5pZCA9IHMuZmlsZV9pZAogICAgICAgICAgICBXSEVSRSBzLnVwbG9hZF9pZD0/IEFORCBzLm5vZGVfaWQ9PwogICAgICAgICAgICAiIiIsCiAgICAgICAgICAgICh1cGxvYWRfaWQsIG5vZGVfaWQpLAogICAgICAgICkuZmV0Y2hvbmUoKQogICAgICAgIGlmIG5vdCBzOgogICAgICAgICAgICByYWlzZSBIVFRQRXhjZXB0aW9uKHN0YXR1c19jb2RlPTQwNCwgZGV0YWlsPSJVcGxvYWQgc2Vzc2lvbiBub3QgZm91bmQiKQogICAgICAgIGNodW5rcyA9IGNvbm4uZXhlY3V0ZSgKICAgICAgICAgICAgIlNFTEVDVCBjaHVua19pbmRleCBGUk9NIHVwbG9hZF9jaHVua3MgV0hFUkUgdXBsb2FkX2lkPT8gT1JERVIgQlkgY2h1bmtfaW5kZXgiLAogICAgICAgICAgICAodXBsb2FkX2lkLCksCiAgICAgICAgKS5mZXRjaGFsbCgpCiAgICByZWNlaXZlZCA9IHtpbnQoY1siY2h1bmtfaW5kZXgiXSkgZm9yIGMgaW4gY2h1bmtzfQogICAgbWlzc2luZyA9IFtpIGZvciBpIGluIHJhbmdlKGludChzWyJ0b3RhbF9jaHVua3MiXSkpIGlmIGkgbm90IGluIHJlY2VpdmVkXQogICAgbmV4dF9taXNzaW5nX2NodW5rID0gbWlzc2luZ1swXSBpZiBtaXNzaW5nIGVsc2UgaW50KHNbInRvdGFsX2NodW5rcyJdKQogICAgbmV4dF9taXNzaW5nX29mZnNldCA9IG1pbihuZXh0X21pc3NpbmdfY2h1bmsgKiBpbnQoc1siY2h1bmtfc2l6ZSJdKSwgaW50KHNbImZpbGVfc2l6ZV9ieXRlcyJdKSkKICAgIHJldHVybiB7CiAgICAgICAgIm9rIjogVHJ1ZSwKICAgICAgICAidXBsb2FkX2lkIjogdXBsb2FkX2lkLAogICAgICAgICJzdGF0dXMiOiBzWyJzdGF0dXMiXSwKICAgICAgICAiYnl0ZXNfcmVjZWl2ZWQiOiBzWyJieXRlc19yZWNlaXZlZCJdLAogICAgICAgICJ0b3RhbF9jaHVua3MiOiBzWyJ0b3RhbF9jaHVua3MiXSwKICAgICAgICAiY2h1bmtfc2l6ZSI6IHNbImNodW5rX3NpemUiXSwKICAgICAgICAibmV4dF9taXNzaW5nX2NodW5rIjogbmV4dF9taXNzaW5nX2NodW5rLAogICAgICAgICJuZXh0X21pc3Npbmdfb2Zmc2V0IjogbmV4dF9taXNzaW5nX29mZnNldCwKICAgICAgICAicmVjZWl2ZWRfY2h1bmtfY291bnQiOiBsZW4ocmVjZWl2ZWQpLAogICAgfQo="
 
-    t = now_epoch()
-    with db_connect() as conn:
-        if local_file_id is not None:
-            f = conn.execute(
-                """
-                SELECT * FROM files
-                WHERE node_id=? AND manifest_id=? AND local_file_id=?
-                """,
-                (node_id, manifest_id, local_file_id),
-            ).fetchone()
-        else:
-            f = conn.execute(
-                """
-                SELECT * FROM files
-                WHERE node_id=? AND manifest_id=? AND filename=? AND file_size_bytes=?
-                """,
-                (node_id, manifest_id, filename, file_size),
-            ).fetchone()
-        if not f:
-            raise HTTPException(status_code=404, detail="File is not in manifest")
-        if int(f["file_size_bytes"]) != file_size:
-            raise HTTPException(status_code=400, detail="File size mismatch")
-        if f["upload_status"] in ("SERVER_COPY_VERIFIED", "SAFE_TO_DELETE", "DELETED_FROM_SD"):
-            return {
-                "ok": True,
-                "already_complete": True,
-                "file_id": f["id"],
-                "upload_status": f["upload_status"],
-            }
-
-        existing = conn.execute(
-            """
-            SELECT * FROM upload_sessions
-            WHERE file_id=? AND status IN ('OPEN', 'PARTIAL')
-            ORDER BY started_at DESC LIMIT 1
-            """,
-            (f["id"],),
-        ).fetchone()
-        if existing and int(existing["chunk_size"]) == requested_chunk_size:
-            upload_id = existing["upload_id"]
-            chunk_size = int(existing["chunk_size"])
-            total_chunks = int(existing["total_chunks"])
-        else:
-            if existing:
-                conn.execute(
-                    "UPDATE upload_sessions SET status='SUPERSEDED', updated_at=? WHERE upload_id=?",
-                    (t, existing["upload_id"]),
-                )
-            upload_id = "UPL_" + uuid.uuid4().hex
-            chunk_size = min(requested_chunk_size, MAX_CHUNK_SIZE)
-            total_chunks = math.ceil(file_size / chunk_size)
-            node_dir = safe_join(INCOMING_DIR, node_id)
-            node_dir.mkdir(parents=True, exist_ok=True)
-            temp_path = safe_join(node_dir, upload_id + ".part")
-            with temp_path.open("wb") as out:
-                out.truncate(file_size)
-            conn.execute(
-                """
-                INSERT INTO upload_sessions (
-                    upload_id, file_id, node_id, status, chunk_size, total_chunks,
-                    bytes_received, temp_path, started_at, updated_at
-                ) VALUES (?, ?, ?, 'OPEN', ?, ?, 0, ?, ?, ?)
-                """,
-                (upload_id, f["id"], node_id, chunk_size, total_chunks, str(temp_path), t, t),
-            )
-            conn.execute(
-                "UPDATE files SET upload_status='UPLOADING', updated_at=? WHERE id=?",
-                (t, f["id"]),
-            )
-        chunks = conn.execute(
-            "SELECT chunk_index FROM upload_chunks WHERE upload_id=? ORDER BY chunk_index",
-            (upload_id,),
-        ).fetchall()
-        received_chunks = [int(c["chunk_index"]) for c in chunks]
-        conn.commit()
-
-    received_set = set(received_chunks)
-    next_missing_chunk = total_chunks
-    for chunk_index in range(total_chunks):
-        if chunk_index not in received_set:
-            next_missing_chunk = chunk_index
-            break
-    next_missing_offset = min(next_missing_chunk * chunk_size, file_size)
-
-    return {
-        "ok": True,
-        "already_complete": False,
-        "upload_id": upload_id,
-        "file_id": f["id"],
-        "chunk_size": chunk_size,
-        "total_chunks": total_chunks,
-        "next_missing_chunk": next_missing_chunk,
-        "next_missing_offset": next_missing_offset,
-        "received_chunk_count": len(received_chunks),
-    }
-'''
-
-          new_upload_status = r'''@app.get("/v1/uploads/{upload_id}/status")
-async def upload_status(upload_id: str, request: Request) -> Dict[str, Any]:
-    body = await request.body()
-    ident = await require_device_auth(request, body)
-    node_id = ident["node_id"]
-    with db_connect() as conn:
-        s = conn.execute(
-            """
-            SELECT s.*, f.file_size_bytes
-            FROM upload_sessions s
-            JOIN files f ON f.id = s.file_id
-            WHERE s.upload_id=? AND s.node_id=?
-            """,
-            (upload_id, node_id),
-        ).fetchone()
-        if not s:
-            raise HTTPException(status_code=404, detail="Upload session not found")
-        chunks = conn.execute(
-            "SELECT chunk_index FROM upload_chunks WHERE upload_id=? ORDER BY chunk_index",
-            (upload_id,),
-        ).fetchall()
-    received = {int(c["chunk_index"]) for c in chunks}
-    missing = [i for i in range(int(s["total_chunks"])) if i not in received]
-    next_missing_chunk = missing[0] if missing else int(s["total_chunks"])
-    next_missing_offset = min(next_missing_chunk * int(s["chunk_size"]), int(s["file_size_bytes"]))
-    return {
-        "ok": True,
-        "upload_id": upload_id,
-        "status": s["status"],
-        "bytes_received": s["bytes_received"],
-        "total_chunks": s["total_chunks"],
-        "chunk_size": s["chunk_size"],
-        "next_missing_chunk": next_missing_chunk,
-        "next_missing_offset": next_missing_offset,
-        "received_chunk_count": len(received),
-    }
-'''
+          new_upload_init = base64.b64decode(upload_init_b64).decode('utf-8')
+          new_upload_status = base64.b64decode(upload_status_b64).decode('utf-8')
 
           def replace_between(source: str, start_marker: str, end_marker: str, replacement: str) -> str:
               start = source.find(start_marker)
@@ -208,6 +64,8 @@ async def upload_status(upload_id: str, request: Request) -> Dict[str, Any]:
               raise SystemExit('upload_init resume count was not applied')
           if '"received_chunk_count": len(received)' not in text:
               raise SystemExit('upload_status resume count was not applied')
+          if '"missing_chunks": missing' in text or '"received_chunks": sorted(received)' in text:
+              raise SystemExit('Bulky status arrays are still present')
 
           path.write_text(text, encoding='utf-8')
           PY
