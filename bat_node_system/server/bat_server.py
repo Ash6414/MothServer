@@ -783,8 +783,11 @@ async def upload_init(request: Request) -> Dict[str, Any]:
     filename = sanitize_filename(str(data.get("filename", "")))
     file_size = int(data.get("file_size_bytes") or 0)
     local_file_id = data.get("local_file_id")
+    requested_chunk_size = int(data.get("chunk_size") or DEFAULT_CHUNK_SIZE)
     if file_size <= 0:
         raise HTTPException(status_code=400, detail="file_size_bytes required")
+    if requested_chunk_size <= 0 or requested_chunk_size > MAX_CHUNK_SIZE:
+        raise HTTPException(status_code=400, detail="Bad chunk_size")
 
     t = now_epoch()
     with db_connect() as conn:
@@ -824,12 +827,18 @@ async def upload_init(request: Request) -> Dict[str, Any]:
             """,
             (f["id"],),
         ).fetchone()
-        if existing:
+        if existing and int(existing["chunk_size"]) == requested_chunk_size:
             upload_id = existing["upload_id"]
             chunk_size = int(existing["chunk_size"])
+            total_chunks = int(existing["total_chunks"])
         else:
+            if existing:
+                conn.execute(
+                    "UPDATE upload_sessions SET status='SUPERSEDED', updated_at=? WHERE upload_id=?",
+                    (t, existing["upload_id"]),
+                )
             upload_id = "UPL_" + uuid.uuid4().hex
-            chunk_size = min(DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE)
+            chunk_size = min(requested_chunk_size, MAX_CHUNK_SIZE)
             total_chunks = math.ceil(file_size / chunk_size)
             node_dir = safe_join(INCOMING_DIR, node_id)
             node_dir.mkdir(parents=True, exist_ok=True)
@@ -853,7 +862,16 @@ async def upload_init(request: Request) -> Dict[str, Any]:
             "SELECT chunk_index FROM upload_chunks WHERE upload_id=? ORDER BY chunk_index",
             (upload_id,),
         ).fetchall()
+        received_chunks = [int(c["chunk_index"]) for c in chunks]
         conn.commit()
+
+    received_set = set(received_chunks)
+    next_missing_chunk = total_chunks
+    for chunk_index in range(total_chunks):
+        if chunk_index not in received_set:
+            next_missing_chunk = chunk_index
+            break
+    next_missing_offset = min(next_missing_chunk * chunk_size, file_size)
 
     return {
         "ok": True,
@@ -861,8 +879,12 @@ async def upload_init(request: Request) -> Dict[str, Any]:
         "upload_id": upload_id,
         "file_id": f["id"],
         "chunk_size": chunk_size,
-        "already_received_chunks": [int(c["chunk_index"]) for c in chunks],
+        "total_chunks": total_chunks,
+        "next_missing_chunk": next_missing_chunk,
+        "next_missing_offset": next_missing_offset,
+        "received_chunk_count": len(received_chunks),
     }
+
 
 
 @app.put("/v1/uploads/{upload_id}/chunks/{chunk_index}")
@@ -946,7 +968,12 @@ async def upload_status(upload_id: str, request: Request) -> Dict[str, Any]:
     node_id = ident["node_id"]
     with db_connect() as conn:
         s = conn.execute(
-            "SELECT * FROM upload_sessions WHERE upload_id=? AND node_id=?",
+            """
+            SELECT s.*, f.file_size_bytes
+            FROM upload_sessions s
+            JOIN files f ON f.id = s.file_id
+            WHERE s.upload_id=? AND s.node_id=?
+            """,
             (upload_id, node_id),
         ).fetchone()
         if not s:
@@ -957,14 +984,18 @@ async def upload_status(upload_id: str, request: Request) -> Dict[str, Any]:
         ).fetchall()
     received = {int(c["chunk_index"]) for c in chunks}
     missing = [i for i in range(int(s["total_chunks"])) if i not in received]
+    next_missing_chunk = missing[0] if missing else int(s["total_chunks"])
+    next_missing_offset = min(next_missing_chunk * int(s["chunk_size"]), int(s["file_size_bytes"]))
     return {
         "ok": True,
         "upload_id": upload_id,
         "status": s["status"],
         "bytes_received": s["bytes_received"],
         "total_chunks": s["total_chunks"],
-        "received_chunks": sorted(received),
-        "missing_chunks": missing,
+        "chunk_size": s["chunk_size"],
+        "next_missing_chunk": next_missing_chunk,
+        "next_missing_offset": next_missing_offset,
+        "received_chunk_count": len(received),
     }
 
 
