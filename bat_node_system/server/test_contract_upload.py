@@ -132,9 +132,41 @@ def test_manifest_init_chunk_complete_and_delete_authorization(tmp_path: Path):
     init_json = init.json()
     assert init_json["ok"] is True
     assert init_json["chunk_size"] == 512
+    assert init_json["total_chunks"] == (len(wav_bytes) + 511) // 512
+    assert init_json["next_missing_chunk"] == 0
+    assert init_json["next_missing_offset"] == 0
+    assert init_json["received_chunk_count"] == 0
 
     upload_id = init_json["upload_id"]
-    for index, start in enumerate(range(0, len(wav_bytes), 512)):
+    first_body = wav_bytes[:512]
+    first_path = f"/v1/uploads/{upload_id}/chunks/0"
+    first_chunk = client.put(
+        first_path,
+        content=first_body,
+        headers={**sign("PUT", first_path, first_body), "Content-Type": "application/octet-stream"},
+    )
+    assert first_chunk.status_code == 200
+    assert first_chunk.json()["ok"] is True
+
+    resume = post_json(
+        client,
+        "/v1/uploads/init",
+        {
+            "manifest_id": manifest_id,
+            "local_file_id": local_file_id,
+            "filename": filename,
+            "file_size_bytes": len(wav_bytes),
+            "chunk_size": 512,
+        },
+    )
+    assert resume.status_code == 200
+    resume_json = resume.json()
+    assert resume_json["upload_id"] == upload_id
+    assert resume_json["next_missing_chunk"] == 1
+    assert resume_json["next_missing_offset"] == 512
+    assert resume_json["received_chunk_count"] == 1
+
+    for index, start in enumerate(range(512, len(wav_bytes), 512), start=1):
         body = wav_bytes[start : start + 512]
         path = f"/v1/uploads/{upload_id}/chunks/{index}"
         chunk = client.put(
