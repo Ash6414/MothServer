@@ -10,6 +10,7 @@ system.
 bat_node_system/
   server/
     bat_server.py              Main authenticated ingest API.
+    bat_server_runtime.py      Production entrypoint with provisioning/FLAC runtime helpers.
     bat_server_contract.py     Legacy raw-query upload adapter.
     compress_existing_wavs.py  Backfill compression command.
     manage_node.py             Manual node credential helper.
@@ -45,7 +46,7 @@ Open PowerShell in `bat_node_system/server`.
 py -3 -m venv .venv
 . .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn bat_server:app --host 0.0.0.0 --port 8000
+uvicorn bat_server_runtime:app --host 0.0.0.0 --port 8000
 ```
 
 In another PowerShell window, open the dashboard:
@@ -181,13 +182,13 @@ flac --version
 ffmpeg -version
 ```
 
-Uploaded WAV files are compressed after upload completion. The server records
-the compression result in SQLite:
+Uploaded WAV files are compressed after upload completion when an encoder is
+available. The server records the compression result in SQLite:
 
 ```text
-DONE                 FLAC was created.
+OK                   FLAC was created.
 SKIPPED_NO_ENCODER   No flac or ffmpeg executable was available.
-FAILED               Encoder ran but did not produce a valid output file.
+ERROR                Encoder ran but did not produce a valid output file.
 ```
 
 Backfill old uploads after installing an encoder:
