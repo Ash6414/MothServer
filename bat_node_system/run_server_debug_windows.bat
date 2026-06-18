@@ -82,7 +82,7 @@ echo Server time:        http://127.0.0.1:8000/v1/public/server_time
 echo Database:           %CD%\bat_nodes_v2.db
 echo.
 
-python -m uvicorn bat_server:app --host 0.0.0.0 --port 8000
+python -m uvicorn bat_server_runtime:app --host 0.0.0.0 --port 8000
 
 echo.
 echo Server stopped.
