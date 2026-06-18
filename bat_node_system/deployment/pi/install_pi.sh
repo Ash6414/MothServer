@@ -87,7 +87,7 @@ Type=simple
 User=$APP_USER
 WorkingDirectory=$SERVER_DIR
 EnvironmentFile=$SERVER_ENV
-ExecStart=$SERVER_DIR/.venv/bin/python -m uvicorn bat_server:app --host 0.0.0.0 --port $SERVER_PORT
+ExecStart=$SERVER_DIR/.venv/bin/python -m uvicorn bat_server_runtime:app --host 0.0.0.0 --port $SERVER_PORT
 Restart=on-failure
 RestartSec=5
 
