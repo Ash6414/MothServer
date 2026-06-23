@@ -11,6 +11,7 @@ import uuid
 import wave
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -19,15 +20,23 @@ KEY_ID = "key-1"
 SECRET = "REPLACE_WITH_64_HEX_OR_SERVER_SECRET"
 
 
-def sign(method: str, path: str, body: bytes = b"") -> dict[str, str]:
+def sign(
+    method: str,
+    path: str,
+    body: bytes = b"",
+    *,
+    secret: str = SECRET,
+    node_id: str = NODE_ID,
+    key_id: str = KEY_ID,
+) -> dict[str, str]:
     timestamp = str(int(time.time()))
     nonce = uuid.uuid4().hex
     body_sha = hashlib.sha256(body).hexdigest()
     canonical = "\n".join([method.upper(), path, timestamp, nonce, body_sha])
-    signature = hmac.new(SECRET.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    signature = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
     return {
-        "X-Node-ID": NODE_ID,
-        "X-Key-ID": KEY_ID,
+        "X-Node-ID": node_id,
+        "X-Key-ID": key_id,
         "X-Timestamp": timestamp,
         "X-Nonce": nonce,
         "X-Body-SHA256": body_sha,
@@ -45,6 +54,10 @@ def build_client(tmp_root: Path) -> TestClient:
     os.environ["BAT_DATA_DIR"] = str(tmp_root / "data")
     os.environ["REQUIRE_FLAC_BEFORE_DELETE"] = "0"
     os.environ["REQUIRE_BACKUP_BEFORE_DELETE"] = "0"
+    os.environ["FLAC_ENCODER"] = "none"
+    os.environ["PROVISIONING_TOKEN"] = "test-provision-token"
+    os.environ["DASHBOARD_USER"] = "admin"
+    os.environ["DASHBOARD_PASSWORD"] = "test-dashboard-password"
 
     import bat_server
 
@@ -83,6 +96,134 @@ def test_server_time(tmp_path: Path):
     assert isinstance(response.json()["epoch_utc"], int)
 
 
+def test_public_gateway_exposes_devices_not_admin():
+    import gateway_policy
+
+    assert gateway_policy.is_public_device_path("/v1/public/server_time")
+    assert gateway_policy.is_public_device_path("/v1/enrollment/request")
+    assert gateway_policy.is_public_device_path("/v1/device/heartbeat")
+    assert gateway_policy.is_public_device_path("/v1/uploads/abc/chunks/0")
+    assert not gateway_policy.is_public_device_path("/admin/enrollment/requests")
+    assert not gateway_policy.is_public_device_path("/dashboard")
+    assert not gateway_policy.is_public_device_path("/docs")
+    assert not gateway_policy.is_public_device_path("/v1/provision/node")
+
+
+def test_provision_node_creates_hmac_credentials(tmp_path: Path):
+    client = build_client(tmp_path)
+    response = client.post(
+        "/v1/provision/node",
+        json={
+            "provisioning_token": "test-provision-token",
+            "node_id": "BATNODE_FIELD_01",
+            "node_name": "Field Node 1",
+            "hardware_version": "ESP32 AudioMoth bridge",
+            "firmware_version": "Moth_Node_ESPBridge",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["node_id"] == "BATNODE_FIELD_01"
+    assert data["key_id"] == "key-1"
+    assert len(data["device_secret"]) == 64
+
+    import bat_server
+
+    assert bat_server.get_node_secret(data["node_id"], data["key_id"]) == data["device_secret"]
+
+
+def test_approved_enrollment_reuses_hardware_node_id(tmp_path: Path):
+    client = build_client(tmp_path)
+    hardware_uid = "A1B2C3D4E5F6"
+
+    first = client.post(
+        "/v1/enrollment/request",
+        json={
+            "hardware_uid": hardware_uid,
+            "node_name": "Reflashed field node",
+            "hardware_version": "ESP32 AudioMoth bridge",
+            "firmware_version": "Moth_Node_ESPBridge",
+        },
+    )
+    assert first.status_code == 200
+    pending = first.json()
+    assert pending["status"] == "PENDING"
+    assert "device_secret" not in pending
+
+    approval = client.post(
+        f"/admin/enrollment/{pending['request_id']}/approve",
+        json={"target_node_id": NODE_ID},
+        auth=("admin", "test-dashboard-password"),
+    )
+    assert approval.status_code == 200
+    assert approval.json()["node_id"] == NODE_ID
+
+    delivered = client.post(
+        f"/v1/enrollment/status/{pending['request_id']}",
+        json={"poll_token": pending["poll_token"]},
+    )
+    assert delivered.status_code == 200
+    first_credentials = delivered.json()
+    assert first_credentials["status"] == "APPROVED"
+    assert first_credentials["node_id"] == NODE_ID
+    assert len(first_credentials["device_secret"]) == 64
+
+    second = client.post(
+        "/v1/enrollment/request",
+        json={"hardware_uid": hardware_uid, "node_name": "Same physical node"},
+    ).json()
+    assert second["recognized_node"] == NODE_ID
+
+    second_approval = client.post(
+        f"/admin/enrollment/{second['request_id']}/approve",
+        json={},
+        auth=("admin", "test-dashboard-password"),
+    )
+    assert second_approval.status_code == 200
+    assert second_approval.json()["node_id"] == NODE_ID
+    assert second_approval.json()["re_enrolled"] is True
+
+    second_delivered = client.post(
+        f"/v1/enrollment/status/{second['request_id']}",
+        json={"poll_token": second["poll_token"]},
+    ).json()
+    assert second_delivered["node_id"] == NODE_ID
+    assert second_delivered["device_secret"] != first_credentials["device_secret"]
+
+    heartbeat_body = json.dumps({"node_id": NODE_ID}, separators=(",", ":")).encode("utf-8")
+    heartbeat = client.post(
+        "/v1/device/heartbeat",
+        content=heartbeat_body,
+        headers={
+            **sign(
+                "POST",
+                "/v1/device/heartbeat",
+                heartbeat_body,
+                secret=second_delivered["device_secret"],
+                node_id=NODE_ID,
+                key_id=second_delivered["key_id"],
+            ),
+            "Content-Type": "application/json",
+        },
+    )
+    assert heartbeat.status_code == 200
+
+    import bat_server
+
+    with bat_server.db_connect() as conn:
+        node = conn.execute("SELECT hardware_uid FROM nodes WHERE node_id=?", (NODE_ID,)).fetchone()
+        node_count = conn.execute("SELECT COUNT(*) AS count FROM nodes").fetchone()["count"]
+        enrollment = conn.execute(
+            "SELECT status, device_secret FROM enrollment_requests WHERE request_id=?",
+            (second["request_id"],),
+        ).fetchone()
+    assert node["hardware_uid"] == hardware_uid
+    assert node_count == 1
+    assert enrollment["status"] == "CLAIMED"
+    assert enrollment["device_secret"] is None
+
+
 def test_heartbeat_hmac_json(tmp_path: Path):
     client = build_client(tmp_path)
     response = post_json(client, "/v1/device/heartbeat", {"node_id": NODE_ID, "battery_v": 4.05, "charging": True})
@@ -116,6 +257,23 @@ def test_manifest_init_chunk_complete_and_delete_authorization(tmp_path: Path):
     assert manifest.status_code == 200
     assert manifest.json()["ok"] is True
     assert manifest.json()["wanted_files"]
+
+    import bat_server
+
+    with bat_server.db_connect() as conn:
+        file_id = int(conn.execute(
+            "SELECT id FROM files WHERE node_id=? AND filename=?",
+            (NODE_ID, filename),
+        ).fetchone()["id"])
+        bat_server.catalog_recording(conn, file_id)
+        conn.commit()
+        catalog_row = conn.execute(
+            "SELECT id, canonical_name, recorded_at_utc, recorded_at_source FROM files WHERE node_id=? AND filename=?",
+            (NODE_ID, filename),
+        ).fetchone()
+    assert catalog_row["canonical_name"] == f"{NODE_ID}_20260609T010203Z_{int(catalog_row['id']):06d}.WAV"
+    assert catalog_row["recorded_at_utc"] == 1780966923
+    assert catalog_row["recorded_at_source"] == "filename_utc"
 
     init = post_json(
         client,
@@ -192,6 +350,7 @@ def test_manifest_init_chunk_complete_and_delete_authorization(tmp_path: Path):
     assert complete.status_code == 200
     assert complete.json()["ok"] is True
     assert complete.json()["wav_parse_status"] == "OK"
+    assert complete.json()["flac_status"] == "SKIPPED_NO_ENCODER"
 
     auth_path = f"/v1/nodes/{NODE_ID}/delete_authorization"
     auth = client.get(
@@ -242,6 +401,191 @@ def test_upload_init_rejects_bad_chunk_size(tmp_path: Path):
         },
     )
     assert response.status_code == 400
+
+
+def test_upload_accepts_esp_64k_chunks(tmp_path: Path):
+    client = build_client(tmp_path)
+    chunk_size = 64 * 1024
+    payload = b"A" * chunk_size + b"tail"
+    manifest_id = f"{NODE_ID}-FAST-CHUNK"
+    local_file_id = 64001
+    filename = "fast-transfer.bin"
+
+    manifest = post_json(
+        client,
+        "/v1/files/manifest",
+        {
+            "node_id": NODE_ID,
+            "manifest_id": manifest_id,
+            "sd_card_id": "AudioMoth",
+            "files": [
+                {
+                    "local_file_id": local_file_id,
+                    "filename": filename,
+                    "file_size_bytes": len(payload),
+                }
+            ],
+        },
+    )
+    assert manifest.status_code == 200
+
+    init = post_json(
+        client,
+        "/v1/uploads/init",
+        {
+            "manifest_id": manifest_id,
+            "local_file_id": local_file_id,
+            "filename": filename,
+            "file_size_bytes": len(payload),
+            "chunk_size": chunk_size,
+        },
+    )
+    assert init.status_code == 200
+    upload = init.json()
+    assert upload["chunk_size"] == chunk_size
+    assert upload["total_chunks"] == 2
+
+    for index, body in enumerate((payload[:chunk_size], payload[chunk_size:])):
+        path = f"/v1/uploads/{upload['upload_id']}/chunks/{index}"
+        response = client.put(
+            path,
+            content=body,
+            headers={**sign("PUT", path, body), "Content-Type": "application/octet-stream"},
+        )
+        assert response.status_code == 200
+
+
+def test_make_flac_uses_flac_cli_when_available(tmp_path: Path, monkeypatch):
+    os.environ["BAT_DB_PATH"] = str(tmp_path / "bat_nodes_v2.db")
+    os.environ["BAT_DATA_DIR"] = str(tmp_path / "data")
+    os.environ["FLAC_ENCODER"] = "flac"
+    os.environ["FLAC_COMPRESSION_LEVEL"] = "8"
+
+    import bat_server
+
+    importlib.reload(bat_server)
+    wav_path = tmp_path / "sample.WAV"
+    wav_path.write_bytes(make_wav())
+    captured = {}
+
+    monkeypatch.setattr(bat_server.shutil, "which", lambda name: "C:/fake/flac.exe" if name == "flac" else None)
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"fLaC")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(bat_server.subprocess, "run", fake_run)
+
+    status, flac_path, error = bat_server.make_flac(wav_path, NODE_ID)
+
+    assert status == "OK"
+    assert error is None
+    assert flac_path is not None
+    assert flac_path.name == "sample.flac"
+    assert captured["cmd"][:5] == ["C:/fake/flac.exe", "-8", "-f", "-s", "-o"]
+    assert captured["kwargs"]["timeout"] == 600
+
+
+def test_catalog_falls_back_to_upload_day_for_unusual_filename(tmp_path: Path):
+    build_client(tmp_path)
+    import bat_server
+
+    created_at = 1781827200
+    with bat_server.db_connect() as conn:
+        conn.execute(
+            "INSERT INTO manifests (manifest_id, node_id, created_at, updated_at, raw_json) VALUES ('odd-manifest', ?, ?, ?, '{}')",
+            (NODE_ID, created_at, created_at),
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO files (node_id, manifest_id, filename, file_size_bytes, upload_status, created_at, updated_at)
+            VALUES (?, 'odd-manifest', 'bat.WAV', 1234, 'ON_SD_ONLY', ?, ?)
+            """,
+            (NODE_ID, created_at, created_at),
+        )
+        file_id = int(cur.lastrowid)
+        bat_server.catalog_recording(conn, file_id)
+        row = conn.execute(
+            "SELECT canonical_name, recorded_at_utc, recorded_at_source FROM files WHERE id=?",
+            (file_id,),
+        ).fetchone()
+        conn.commit()
+
+    assert row["canonical_name"] == f"{NODE_ID}_UPLOADED_20260619_{file_id:06d}.WAV"
+    assert row["recorded_at_utc"] is None
+    assert row["recorded_at_source"] == "upload_day_fallback"
+
+
+def test_reconcile_compresses_missed_verified_wav(tmp_path: Path, monkeypatch):
+    build_client(tmp_path)
+    import bat_server
+
+    wav_path = tmp_path / "data" / "original_wav" / NODE_ID / "missed.WAV"
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path.write_bytes(make_wav())
+    t = int(time.time())
+    with bat_server.db_connect() as conn:
+        conn.execute(
+            "INSERT INTO manifests (manifest_id, node_id, created_at, updated_at, raw_json) VALUES ('missed-manifest', ?, ?, ?, '{}')",
+            (NODE_ID, t, t),
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO files (
+                node_id, manifest_id, filename, file_size_bytes, upload_status, bytes_received,
+                wav_parse_status, flac_status, original_wav_path, created_at, updated_at
+            ) VALUES (?, 'missed-manifest', 'missed.WAV', ?, 'SERVER_COPY_VERIFIED', ?,
+                      'NOT_RUN_FAST_FINISH', 'SKIPPED_NO_ENCODER', ?, ?, ?)
+            """,
+            (NODE_ID, wav_path.stat().st_size, wav_path.stat().st_size, str(wav_path), t, t),
+        )
+        file_id = int(cur.lastrowid)
+        bat_server.catalog_recording(conn, file_id)
+        conn.commit()
+
+    monkeypatch.setattr(bat_server, "find_flac_encoder", lambda: ("flac", "C:/fake/flac.exe"))
+
+    def fake_make_flac(source: Path, node_id: str):
+        output = tmp_path / "data" / "flac" / node_id / source.with_suffix(".flac").name
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"fLaC" + b"\x00" * 32)
+        return "OK", output, None
+
+    monkeypatch.setattr(bat_server, "make_flac", fake_make_flac)
+    result = bat_server.reconcile_flac_files(limit=1, file_ids=[file_id])
+
+    assert result["ok"] is True
+    assert result["compressed"] == 1
+    with bat_server.db_connect() as conn:
+        row = conn.execute(
+            "SELECT wav_parse_status, flac_status, flac_path, sample_rate FROM files WHERE id=?",
+            (file_id,),
+        ).fetchone()
+    assert row["wav_parse_status"] == "OK"
+    assert row["flac_status"] == "OK"
+    assert Path(row["flac_path"]).read_bytes()[:4] == b"fLaC"
+    assert row["sample_rate"] == 8000
+
+
+def test_parse_wav_rejects_empty_audio(tmp_path: Path):
+    build_client(tmp_path)
+    import bat_server
+
+    empty_wav = tmp_path / "empty.WAV"
+    with wave.open(str(empty_wav), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(8000)
+        out.writeframes(b"")
+
+    try:
+        bat_server.parse_wav(empty_wav)
+    except ValueError as exc:
+        assert "no audio frames" in str(exc)
+    else:
+        raise AssertionError("Empty WAV should not pass validation")
 
 
 def test_bad_signature_rejected(tmp_path: Path):
