@@ -454,6 +454,7 @@ def test_upload_accepts_esp_64k_chunks(tmp_path: Path):
             headers={**sign("PUT", path, body), "Content-Type": "application/octet-stream"},
         )
         assert response.status_code == 200
+        assert response.json()["server_ms"] >= 0
 
 
 def test_make_flac_uses_flac_cli_when_available(tmp_path: Path, monkeypatch):
