@@ -350,7 +350,8 @@ def test_manifest_init_chunk_complete_and_delete_authorization(tmp_path: Path):
     assert complete.status_code == 200
     assert complete.json()["ok"] is True
     assert complete.json()["wav_parse_status"] == "OK"
-    assert complete.json()["flac_status"] == "SKIPPED_NO_ENCODER"
+    assert complete.json()["flac_status"] == "PENDING"
+    assert complete.json()["finalize_ms"] >= 0
 
     auth_path = f"/v1/nodes/{NODE_ID}/delete_authorization"
     auth = client.get(
