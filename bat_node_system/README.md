@@ -328,6 +328,11 @@ receives a command but loses its ACK request, the server redelivers that command
 after `COMMAND_REDELIVER_AFTER_SECONDS` seconds, default `120`, until it expires
 or receives the ACK.
 
+Supported dashboard command types include `PING`, `UPLOAD_NOW`,
+`SYNC_MOTH_TIME`, `MOTH_STATUS`, `MOTH_LIST`, `MOTH_TEST_STREAM`, and
+`OPEN_SETUP`. `MOTH_TEST_STREAM` is a no-SD-card UART speed diagnostic for the
+matching ESP32 and AudioMoth firmware.
+
 Protected requests include:
 
 ```text

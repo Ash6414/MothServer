@@ -109,6 +109,20 @@ def test_public_gateway_exposes_devices_not_admin():
     assert not gateway_policy.is_public_device_path("/v1/provision/node")
 
 
+def test_contract_command_allowlist_matches_dashboard_actions():
+    import bat_server_contract
+
+    assert {
+        "PING",
+        "UPLOAD_NOW",
+        "SYNC_MOTH_TIME",
+        "MOTH_STATUS",
+        "MOTH_LIST",
+        "MOTH_TEST_STREAM",
+        "OPEN_SETUP",
+    }.issubset(bat_server_contract.ALLOWED_COMMAND_TYPES)
+
+
 def test_provision_node_creates_hmac_credentials(tmp_path: Path):
     client = build_client(tmp_path)
     response = client.post(

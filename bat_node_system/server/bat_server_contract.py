@@ -36,7 +36,15 @@ NONCE_RETENTION_SECONDS = int(os.getenv("AUTH_NONCE_RETENTION_SECONDS", str(AUTH
 DEFAULT_NODE_ID = os.getenv("MOTH_NODE_ID", "BATNODE_001")
 DEFAULT_KEY_ID = os.getenv("MOTH_KEY_ID", "key-1")
 DEFAULT_DEVICE_SECRET = os.getenv("MOTH_DEVICE_SECRET", "REPLACE_WITH_64_HEX_OR_SERVER_SECRET")
-ALLOWED_COMMAND_TYPES = {"PING", "UPLOAD_NOW", "SYNC_MOTH_TIME", "MOTH_STATUS"}
+ALLOWED_COMMAND_TYPES = {
+    "PING",
+    "UPLOAD_NOW",
+    "SYNC_MOTH_TIME",
+    "MOTH_STATUS",
+    "MOTH_LIST",
+    "MOTH_TEST_STREAM",
+    "OPEN_SETUP",
+}
 TIMESTAMP_RE = re.compile(r"(?:^|/)(?P<date>\d{8})_(?P<time>\d{6})\.wav$", re.IGNORECASE)
 SAFE_NODE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_PATH_PART_RE = re.compile(r"^[A-Za-z0-9._-]+$")
