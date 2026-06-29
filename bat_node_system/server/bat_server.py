@@ -45,6 +45,7 @@ FLAC_COMPRESSION_LEVEL = os.getenv("FLAC_COMPRESSION_LEVEL", "5").strip()
 FLAC_RECONCILE_INTERVAL_SECONDS = max(60, int(os.getenv("FLAC_RECONCILE_INTERVAL_SECONDS", "900")))
 FLAC_RECONCILE_BATCH_SIZE = max(1, int(os.getenv("FLAC_RECONCILE_BATCH_SIZE", "5")))
 FLAC_RECONCILE_START_DELAY_SECONDS = max(1, int(os.getenv("FLAC_RECONCILE_START_DELAY_SECONDS", "30")))
+COMMAND_REDELIVER_AFTER_SECONDS = max(30, int(os.getenv("COMMAND_REDELIVER_AFTER_SECONDS", "120")))
 PROVISIONING_TOKEN = os.getenv("PROVISIONING_TOKEN", "").strip()
 ENROLLMENT_TTL_SECONDS = int(os.getenv("ENROLLMENT_TTL_SECONDS", "1800"))
 ENROLLMENT_POLL_SECONDS = max(2, int(os.getenv("ENROLLMENT_POLL_SECONDS", "3")))
@@ -1173,18 +1174,22 @@ async def get_commands(node_id: str, request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="node_id mismatch")
 
     t = now_epoch()
+    retry_before = t - COMMAND_REDELIVER_AFTER_SECONDS
     with db_connect() as conn:
         rows = conn.execute(
             """
             SELECT id, command_type, payload_json
             FROM commands
             WHERE node_id = ?
-              AND status = 'PENDING'
+              AND (
+                status = 'PENDING'
+                OR (status = 'DELIVERED' AND acked_at IS NULL AND COALESCE(delivered_at, 0) <= ?)
+              )
               AND (expires_at IS NULL OR expires_at > ?)
             ORDER BY created_at ASC
             LIMIT 5
             """,
-            (node_id, t),
+            (node_id, retry_before, t),
         ).fetchall()
         ids = [r["id"] for r in rows]
         if ids:

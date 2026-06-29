@@ -10,7 +10,6 @@ system.
 bat_node_system/
   server/
     bat_server.py              Main authenticated ingest API.
-    bat_server_runtime.py      Production entrypoint with provisioning/FLAC runtime helpers.
     bat_server_contract.py     Legacy raw-query upload adapter.
     compress_existing_wavs.py  Backfill compression command.
     manage_node.py             Manual node credential helper.
@@ -24,6 +23,12 @@ bat_node_system/
   deployment/pi/
     deploy_to_pi.ps1           Windows-to-Pi deploy helper.
     install_pi.sh              Pi installer and systemd service setup.
+
+  deployment/windows/
+    BatNodeControl.ps1         Native dark Windows control app.
+    Manage-BatNodeStack.ps1    Safe start, restart, and stop engine.
+
+  BatNode Control.vbs          Silent one-double-click launcher.
 ```
 
 ## Current node flow
@@ -66,6 +71,31 @@ server:    http://127.0.0.1:8000
 dashboard: http://127.0.0.1:8501
 ```
 
+## Windows control app
+
+After the first-time Python setup, double-click:
+
+```text
+BatNode Control.vbs
+```
+
+`DashboardApp.bat` now opens the same app, so existing shortcuts continue to
+work. The control app automatically starts and monitors:
+
+- FastAPI server on port 8000
+- device-only gateway on port 8001
+- Streamlit dashboard on port 8501
+- Tailscale Funnel for the ESP32 API
+- private Tailscale Serve access for the dashboard
+
+The dark console shows live service state and remote URLs. It includes **Open
+Dashboard**, **Start**, **Restart**, **Stop**, and **Open Logs** controls. Closing
+the window leaves the services running. Enable **Launch at sign-in** inside the
+app when the PC should bring the stack up automatically after login.
+
+Operational logs are kept in `logs/control.log`; server, gateway, and dashboard
+stdout/stderr remain in their existing files under `logs/`.
+
 ## Raspberry Pi 4 deployment
 
 The deploy script copies this folder to the Pi, installs system packages,
@@ -76,26 +106,26 @@ Default Pi identity used by the helper:
 
 ```text
 host: raspberrypi.local
-user: pchem
+user: <pi-user>
 ```
 
 Run from Windows PowerShell:
 
 ```powershell
-cd "C:\Users\ashw6\OneDrive\Desktop\Audiomoth Project\Code\Server\MothServer-main\bat_node_system"
-.\deployment\pi\deploy_to_pi.ps1 -PiHost raspberrypi.local -PiUser pchem
+cd "C:\path\to\bat_node_system"
+.\deployment\pi\deploy_to_pi.ps1 -PiHost raspberrypi.local -PiUser <pi-user>
 ```
 
 If mDNS is not resolving, use the Pi LAN IP:
 
 ```powershell
-.\deployment\pi\deploy_to_pi.ps1 -PiHost 192.168.0.20 -PiUser pchem
+.\deployment\pi\deploy_to_pi.ps1 -PiHost <pi-lan-ip> -PiUser <pi-user>
 ```
 
 For a clean Pi install without copying the current local database or recordings:
 
 ```powershell
-.\deployment\pi\deploy_to_pi.ps1 -PiHost raspberrypi.local -PiUser pchem -SkipRuntimeData
+.\deployment\pi\deploy_to_pi.ps1 -PiHost raspberrypi.local -PiUser <pi-user> -SkipRuntimeData
 ```
 
 After deployment, run this on the Pi:
@@ -120,8 +150,27 @@ server:    http://raspberrypi.local:8000
 dashboard: http://raspberrypi.local:8501
 ```
 
-Use a public URL only after router port forwarding, VPN, reverse proxy, or a
-secure tunnel is configured.
+## Windows internet access without port forwarding
+
+Install and sign in to Tailscale on the server PC, start `DashboardApp.bat`,
+then run:
+
+```text
+StartInternetAccess.cmd
+```
+
+The helper verifies both local services and configures:
+
+- Tailscale Funnel on HTTPS port 443 for device-only gateway port 8001.
+- Tailscale Serve on HTTPS port 8443 for the private dashboard.
+
+It prints both stable URLs. Enter the HTTPS Funnel URL as the ESP32 server URL.
+Only devices signed into the same Tailscale network can open the dashboard URL.
+Run `StopInternetAccess.cmd` to remove both mappings.
+
+The Funnel never targets admin server port 8000. `bat_public_gateway.py` allows
+only enrollment, heartbeat, command polling, upload, and deletion endpoints;
+admin routes and API documentation return 404 through the public tunnel.
 
 ## ESP32 node provisioning
 
@@ -136,12 +185,23 @@ Setup page: http://192.168.4.1
 
 Recommended setup path:
 
-1. Run `bat-node-info` on the Pi and copy the `PROVISIONING_TOKEN`.
-2. Connect to the ESP32 setup Wi-Fi network.
-3. Open `http://192.168.4.1`.
-4. Enter field Wi-Fi, server URL, and provisioning token.
-5. The server creates the node ID, key ID, and device secret.
-6. The ESP32 saves those values in NVS and reboots into normal bridge mode.
+1. Connect to the ESP32 setup Wi-Fi network.
+2. Open `http://192.168.4.1`.
+3. Choose personal, enterprise, or open Wi-Fi and enter its credentials.
+4. Enter the public HTTPS server URL printed by `StartInternetAccess.cmd`.
+5. Submit the enrollment request.
+6. Open **Add Nodes** in the dashboard and press **Approve**.
+7. The ESP32 receives its node ID and secret directly, saves them, and restarts.
+
+Approval pickup is driven by the ESP32, not by the setup browser. The device
+continues polling after the phone or laptop disconnects from its setup network.
+Its first authenticated request marks enrollment `CLAIMED` and clears the
+temporary enrollment copy of the device secret.
+
+Device secrets are never copied through the UI. The ESP32 eFuse hardware ID is
+linked to the node record. If firmware or NVS is erased later, select the old
+node during approval; later reflashes are recognized automatically and retain
+the same node ID, history, map location, and files.
 
 Manual setup is still available:
 
@@ -164,13 +224,18 @@ AUTH_WINDOW_SECONDS=300
 DASHBOARD_USER=admin
 DASHBOARD_PASSWORD=change-me-now
 PROVISIONING_TOKEN=
+ENROLLMENT_TTL_SECONDS=1800
+ENROLLMENT_POLL_SECONDS=3
 REQUIRE_FLAC_BEFORE_DELETE=0
 REQUIRE_BACKUP_BEFORE_DELETE=0
 FLAC_ENCODER=auto
 FLAC_COMPRESSION_LEVEL=5
+FLAC_RECONCILE_INTERVAL_SECONDS=900
+FLAC_RECONCILE_BATCH_SIZE=5
 ```
 
-Leave `PROVISIONING_TOKEN` blank to disable automatic node provisioning.
+`PROVISIONING_TOKEN` is retained only for older firmware. New nodes use pending
+dashboard approval and do not require a shared token.
 
 ## FLAC compression
 
@@ -182,13 +247,19 @@ flac --version
 ffmpeg -version
 ```
 
-Uploaded WAV files are compressed after upload completion when an encoder is
-available. The server records the compression result in SQLite:
+Uploaded WAV files enter the compression queue after upload completion. A
+background reconciliation pass runs every 15 minutes by default, so files
+missed while the encoder was unavailable are retried automatically. The Data
+Management page also has a **Check and compress WAV files** button.
+
+The server validates the WAV before encoding and checks the FLAC file signature
+before recording success in SQLite:
 
 ```text
-OK                   FLAC was created.
+OK                   FLAC was created and validated.
+PENDING              Waiting for a compression pass.
 SKIPPED_NO_ENCODER   No flac or ffmpeg executable was available.
-ERROR                Encoder ran but did not produce a valid output file.
+ERROR: ...           Source validation or encoding failed.
 ```
 
 Backfill old uploads after installing an encoder:
@@ -209,6 +280,32 @@ python compress_existing_wavs.py --force
 Compression does not block AudioMoth deletion unless
 `REQUIRE_FLAC_BEFORE_DELETE=1`.
 
+## Recording catalog and storage
+
+The database preserves the original AudioMoth filename and assigns every file a
+stable server name. A timestamp found in the manifest or filename produces:
+
+```text
+BATNODE_001_20260619T013740Z_000003.WAV
+```
+
+If a filename has no reliable timestamp, it is still categorized by node and
+upload day:
+
+```text
+BATNODE_001_UPLOADED_20260619_000003.WAV
+```
+
+The recording row snapshots the node location and records where the timestamp
+came from. This keeps later weather matching tied to the recording's time and
+deployment location even if the node is moved.
+
+The private dashboard's **Data Management** page can download a consistent
+SQLite backup, clear operational history, delete all recordings, or reset all
+server data. Every destructive bulk action requires an exact confirmation phrase
+and creates a timestamped backup under `data/backups` first. Per-recording WAV
+and FLAC downloads and deletion are available on the **Recordings** page.
+
 ## API contract used by ESP32
 
 ```http
@@ -225,6 +322,11 @@ POST /v1/uploads/{upload_id}/complete
 GET  /v1/nodes/{node_id}/delete_authorization?manifest_id=...
 POST /v1/nodes/{node_id}/delete_confirm
 ```
+
+Dashboard commands are normally returned once and marked `DELIVERED`. If a node
+receives a command but loses its ACK request, the server redelivers that command
+after `COMMAND_REDELIVER_AFTER_SECONDS` seconds, default `120`, until it expires
+or receives the ACK.
 
 Protected requests include:
 

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, Optional
 
-from fastapi import HTTPException, Request
+from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 import bat_server as legacy
@@ -429,6 +429,7 @@ def upsert_legacy_file(conn: sqlite3.Connection, node_id: str, source_path: str,
     if row:
         file_id = int(row["id"])
         conn.execute("UPDATE files SET updated_at=?, upload_status='UPLOADING' WHERE id=?", (t, file_id))
+        legacy.catalog_recording(conn, file_id, rename_files=False)
         return file_id
     recorded_at = iso_utc(recording_epoch) if recording_epoch is not None else None
     cur = conn.execute(
@@ -439,7 +440,9 @@ def upsert_legacy_file(conn: sqlite3.Connection, node_id: str, source_path: str,
         """,
         (node_id, manifest_id, source_path, recorded_at, recorded_at, size, t, t),
     )
-    return int(cur.lastrowid)
+    file_id = int(cur.lastrowid)
+    legacy.catalog_recording(conn, file_id, rename_files=False)
+    return file_id
 
 
 @app.post("/v1/device/{node_id}/upload/start")
@@ -515,7 +518,7 @@ async def contract_upload_chunk(node_id: str, request: Request, path: str, offse
 
 
 @app.post("/v1/device/{node_id}/upload/finish")
-async def contract_upload_finish(node_id: str, request: Request) -> Dict[str, Any]:
+async def contract_upload_finish(node_id: str, request: Request, background_tasks: BackgroundTasks) -> Dict[str, Any]:
     body = await request.body()
     ident = await require_contract_auth(request, body)
     if ident["node_id"] != node_id:
@@ -527,8 +530,10 @@ async def contract_upload_finish(node_id: str, request: Request) -> Dict[str, An
     size = int(data.get("size") or 0)
     if size <= 0:
         raise HTTPException(status_code=400, detail="size must be positive")
-    _, final_path = upload_paths(node_id, source)
     t = now_epoch()
+    legacy_file_id: Optional[int] = None
+    wav_status = "ERROR"
+    wav_meta: Dict[str, Any] = {}
     with db_connect() as conn:
         session = conn.execute("SELECT * FROM esp32_upload_sessions WHERE node_id=? AND source_path=? AND status IN ('started', 'uploading') ORDER BY id DESC LIMIT 1", (node_id, source.as_posix())).fetchone()
         if not session:
@@ -541,14 +546,58 @@ async def contract_upload_finish(node_id: str, request: Request) -> Dict[str, An
         temp_path = Path(str(session["temp_path"]))
         if not temp_path.exists() or temp_path.stat().st_size != size:
             raise HTTPException(status_code=409, detail="temporary file size mismatch")
+        legacy_file_id = int(session["legacy_file_id"]) if session["legacy_file_id"] else None
+        if not legacy_file_id:
+            raise HTTPException(status_code=409, detail="upload is missing its recording catalog entry")
+        legacy.catalog_recording(conn, legacy_file_id, rename_files=False)
+        file_row = conn.execute(
+            "SELECT canonical_name FROM files WHERE id=?",
+            (legacy_file_id,),
+        ).fetchone()
+        if not file_row or not file_row["canonical_name"]:
+            raise HTTPException(status_code=409, detail="recording catalog name is unavailable")
+        node_wav_dir = legacy.safe_join(legacy.WAV_DIR, node_id)
+        node_wav_dir.mkdir(parents=True, exist_ok=True)
+        final_path = legacy.safe_join(node_wav_dir, str(file_row["canonical_name"]))
+        if final_path.exists():
+            final_path.unlink()
         os.replace(temp_path, final_path)
         server_sha = file_sha256(final_path)
         recording_epoch = parse_recording_epoch(source.as_posix())
+
+        try:
+            wav_meta = legacy.parse_wav(final_path)
+            wav_status = "OK"
+        except Exception as exc:
+            wav_status = f"ERROR: {exc}"
+
         conn.execute("UPDATE esp32_upload_sessions SET received_bytes=?, status='complete', final_path=?, finished_epoch=?, updated_epoch=?, error_message=NULL WHERE id=?", (size, str(final_path), data.get("finished_epoch") or t, t, session["id"]))
         if session["legacy_upload_id"]:
-            conn.execute("UPDATE upload_sessions SET status='COMPLETE', bytes_received=?, completed_at=?, updated_at=? WHERE upload_id=?", (size, t, t, session["legacy_upload_id"]))
-        if session["legacy_file_id"]:
-            conn.execute("UPDATE files SET upload_status='SERVER_COPY_VERIFIED', bytes_received=?, server_sha256=?, wav_parse_status='NOT_RUN_FAST_FINISH', original_wav_path=?, weather_status=COALESCE(weather_status, 'pending'), updated_at=? WHERE id=?", (size, server_sha, str(final_path), t, session["legacy_file_id"]))
+            session_status = "COMPLETE" if wav_status == "OK" else "COMPLETE_BUT_INVALID"
+            conn.execute("UPDATE upload_sessions SET status=?, bytes_received=?, completed_at=?, updated_at=? WHERE upload_id=?", (session_status, size, t, t, session["legacy_upload_id"]))
+        conn.execute(
+            """
+            UPDATE files
+            SET upload_status=?, bytes_received=?, server_sha256=?, wav_parse_status=?,
+                sample_rate=?, channels=?, bit_depth=?, duration_seconds=?,
+                flac_status=?, original_wav_path=?, flac_path=NULL, updated_at=?
+            WHERE id=?
+            """,
+            (
+                "SERVER_COPY_VERIFIED" if wav_status == "OK" else "SERVER_COPY_FAILED_PARSE",
+                size,
+                server_sha,
+                wav_status,
+                wav_meta.get("sample_rate"),
+                wav_meta.get("channels"),
+                wav_meta.get("bit_depth"),
+                wav_meta.get("duration_seconds"),
+                "PENDING" if wav_status == "OK" else "NOT_RUN",
+                str(final_path),
+                t,
+                legacy_file_id,
+            ),
+        )
         conn.execute(
             """
             INSERT INTO recordings (node_id, source_path, stored_path, size, uploaded_epoch, recording_epoch, sha256, weather_status, weather_json)
@@ -562,7 +611,16 @@ async def contract_upload_finish(node_id: str, request: Request) -> Dict[str, An
         )
         conn.execute("UPDATE node_state SET upload_status=?, updated_at=? WHERE node_id=?", (f"upload complete: {source.as_posix()}", t, node_id))
         conn.commit()
-    return {"ok": True, "path": source.as_posix(), "size": size, "stored_path": str(final_path)}
+    if wav_status == "OK" and legacy_file_id is not None:
+        background_tasks.add_task(legacy.reconcile_flac_files, 1, [legacy_file_id], False)
+    return {
+        "ok": wav_status == "OK",
+        "path": source.as_posix(),
+        "size": size,
+        "stored_path": str(final_path),
+        "wav_parse_status": wav_status,
+        "flac_status": "PENDING" if wav_status == "OK" else "NOT_RUN",
+    }
 
 
 @app.post("/v1/admin/{node_id}/commands/{command_type}")

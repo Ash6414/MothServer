@@ -77,12 +77,11 @@ if errorlevel 1 goto fail
 echo.
 echo Starting FastAPI server. Keep this window open.
 echo Local health check: http://127.0.0.1:8000/health
-echo LAN health check:   http://192.168.0.207:8000/health
 echo Server time:        http://127.0.0.1:8000/v1/public/server_time
 echo Database:           %CD%\bat_nodes_v2.db
 echo.
 
-python -m uvicorn bat_server_runtime:app --host 0.0.0.0 --port 8000
+python -m uvicorn bat_server_runtime:app --host 127.0.0.1 --port 8000
 
 echo.
 echo Server stopped.

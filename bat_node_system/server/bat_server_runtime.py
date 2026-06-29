@@ -19,6 +19,7 @@ app = bat_server.app
 NODE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,48}$")
 PROVISIONING_TOKEN = os.getenv("PROVISIONING_TOKEN", "").strip()
 FLAC_ENCODER = os.getenv("FLAC_ENCODER", "auto").strip().lower()
+FLAC_ENCODER_PATH = os.getenv("FLAC_ENCODER_PATH", "").strip()
 FLAC_COMPRESSION_LEVEL = os.getenv("FLAC_COMPRESSION_LEVEL", "5").strip()
 
 
@@ -48,10 +49,21 @@ def find_flac_encoder() -> Tuple[Optional[str], Optional[str]]:
     else:
         candidates = ("flac", "ffmpeg")
 
+    if FLAC_ENCODER_PATH:
+        explicit = Path(FLAC_ENCODER_PATH).expanduser()
+        if explicit.is_file():
+            name = "ffmpeg" if "ffmpeg" in explicit.stem.lower() else "flac"
+            return name, str(explicit)
+
     for name in candidates:
         path = shutil.which(name)
         if path:
             return name, path
+    if os.name == "nt" and "flac" in candidates:
+        package_root = Path(os.getenv("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+        matches = sorted(package_root.glob("Xiph.FLAC_*/flac-*-win/Win64/flac.exe"), reverse=True)
+        if matches:
+            return "flac", str(matches[0])
     return None, None
 
 

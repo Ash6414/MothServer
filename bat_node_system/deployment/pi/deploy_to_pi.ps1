@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PiHost,
 
-    [string]$PiUser = "pchem",
+    [string]$PiUser = "pi",
     [string]$PiHostname = "raspberrypi",
     [string]$RemoteDir = "",
     [switch]$SkipRuntimeData,

@@ -26,7 +26,7 @@ if [ "$(hostname)" != "$PI_HOSTNAME" ]; then
     sudo hostnamectl set-hostname "$PI_HOSTNAME"
 fi
 if grep -qE '^127\.0\.1\.1\s+' /etc/hosts; then
-    sudo sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$PI_HOSTNAME/" /etc/hosts
+    sudo sed -i "s/^127\\.0\\.1\\.1.*/127.0.1.1\t$PI_HOSTNAME/" /etc/hosts
 else
     echo -e "127.0.1.1\t$PI_HOSTNAME" | sudo tee -a /etc/hosts >/dev/null
 fi

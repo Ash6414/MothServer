@@ -47,24 +47,35 @@ streamlit run bat_dashboard_app.py
 ## Pages
 
 - Overview
-- Nodes
+- Add Nodes with approval-based enrollment
+- Fleet with one-click node commands
 - Satellite map
-- Files
-- SD cleanup
+- Recordings
+- Data Management with database backup, FLAC reconciliation, and guarded clear actions
+- SD Cleanup
 - Telemetry charts
-- Commands
+- Command Queue
 - Diagnostics
-- Raw DB viewer
+- Raw Database viewer
+
+The Recordings page shows the server's canonical name, original AudioMoth name,
+recording time source, and deployment location. Select one recording to download
+its WAV or FLAC copy, or delete its server files while retaining a catalog
+tombstone.
+
+Data Management provides three separate cleanup levels:
+
+- `CLEAR HISTORY` keeps nodes and recordings.
+- `DELETE RECORDINGS` keeps enrolled nodes but removes recording storage.
+- `RESET SERVER` removes nodes and credentials too, so devices must enroll again.
+
+A database backup is created before each bulk cleanup and retained in
+`server/data/backups`.
 
 ## Security note
 
 Run this locally on the home PC or behind a private tunnel/VPN. Do not expose the Streamlit port directly to the public internet.
 
-For remote use, place it behind:
-
-- Tailscale
-- ZeroTier
-- Cloudflare Access
-- A reverse proxy with authentication
-
-The public device ingest API should remain separate from this human dashboard.
+For remote use on Windows, run `StartInternetAccess.cmd` from the parent folder.
+It publishes the dashboard privately with Tailscale Serve while Funnel exposes
+the separate device-only gateway. Do not Funnel port 8501 or admin port 8000.
