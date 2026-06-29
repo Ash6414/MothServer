@@ -1179,7 +1179,7 @@ def page_nodes(nodes: pd.DataFrame) -> None:
 
     st.subheader("Node actions")
     st.caption("Commands are queued immediately. A sleeping node receives them the next time it wakes and checks in.")
-    col_a, col_b, col_c, col_d, col_e = st.columns(5)
+    col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns(7)
     with col_a:
         if st.button("Ping", width="stretch", type="primary", help="Ask the node to post a fresh heartbeat"):
             cid = queue_command(selected, "PING")
@@ -1193,10 +1193,18 @@ def page_nodes(nodes: pd.DataFrame) -> None:
             cid = queue_command(selected, "MOTH_STATUS")
             st.success(f"Bridge check queued as command #{cid}.")
     with col_d:
+        if st.button("List SD", width="stretch", help="List AudioMoth SD card files and free space"):
+            cid = queue_command(selected, "MOTH_LIST")
+            st.success(f"SD list queued as command #{cid}.")
+    with col_e:
+        if st.button("Test UART", width="stretch", help="Measure the 921600-baud AudioMoth-to-ESP stream path"):
+            cid = queue_command(selected, "MOTH_TEST_STREAM")
+            st.success(f"UART test queued as command #{cid}.")
+    with col_f:
         if st.button("Sync clock", width="stretch", help="Send current server time to AudioMoth"):
             cid = queue_command(selected, "SYNC_MOTH_TIME")
             st.success(f"Clock sync queued as command #{cid}.")
-    with col_e:
+    with col_g:
         if st.button("Change network", width="stretch", help="Restart into the local Wi-Fi setup portal"):
             cid = queue_command(selected, "OPEN_SETUP")
             st.success(f"Setup restart queued as command #{cid}.")
