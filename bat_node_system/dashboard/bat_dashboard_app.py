@@ -52,6 +52,15 @@ ONLINE_TIMEOUT_SECONDS = int(os.getenv("BAT_ONLINE_TIMEOUT_SECONDS", "900"))
 SERVER_URL = os.getenv("BAT_SERVER_URL", "http://127.0.0.1:8000").rstrip("/")
 SERVER_ADMIN_USER = os.getenv("DASHBOARD_USER", "admin")
 SERVER_ADMIN_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "change-me-now")
+DASHBOARD_COMMAND_TYPES = {
+    "PING",
+    "UPLOAD_NOW",
+    "SYNC_MOTH_TIME",
+    "MOTH_STATUS",
+    "MOTH_LIST",
+    "MOTH_TEST_STREAM",
+    "OPEN_SETUP",
+}
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -544,6 +553,9 @@ def load_errors(limit: int = 500) -> pd.DataFrame:
 
 def queue_command(node_id: str, command_type: str, payload: dict[str, Any] | None = None) -> int:
     t = now_epoch()
+    command_type = command_type.upper()
+    if command_type not in DASHBOARD_COMMAND_TYPES:
+        raise ValueError(f"Unsupported command type: {command_type}")
     payload_json = json.dumps(payload or {})
     with db_connect() as conn:
         cur = conn.execute(
@@ -551,7 +563,7 @@ def queue_command(node_id: str, command_type: str, payload: dict[str, Any] | Non
             INSERT INTO commands (node_id, command_type, payload_json, status, created_at, expires_at)
             VALUES (?, ?, ?, 'PENDING', ?, ?)
             """,
-            (node_id, command_type.upper(), payload_json, t, t + 24 * 3600),
+            (node_id, command_type, payload_json, t, t + 24 * 3600),
         )
         conn.commit()
         return int(cur.lastrowid)

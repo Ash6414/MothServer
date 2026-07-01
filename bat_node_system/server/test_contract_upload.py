@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import hmac
 import importlib
@@ -18,6 +19,23 @@ from fastapi.testclient import TestClient
 NODE_ID = "BATNODE_001"
 KEY_ID = "key-1"
 SECRET = "REPLACE_WITH_64_HEX_OR_SERVER_SECRET"
+
+
+def literal_string_set(path: Path, name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            continue
+        if not isinstance(node.value, (ast.Set, ast.List, ast.Tuple)):
+            raise AssertionError(f"{name} is not a literal set/list/tuple")
+        values = set()
+        for item in node.value.elts:
+            assert isinstance(item, ast.Constant) and isinstance(item.value, str)
+            values.add(item.value)
+        return values
+    raise AssertionError(f"{name} not found in {path}")
 
 
 def sign(
@@ -113,17 +131,14 @@ def test_command_allowlists_match_runtime_contract_and_dashboard_actions():
     import bat_server
     import bat_server_contract
 
-    dashboard_actions = {
-        "PING",
-        "UPLOAD_NOW",
-        "SYNC_MOTH_TIME",
-        "MOTH_STATUS",
-        "MOTH_LIST",
-        "MOTH_TEST_STREAM",
-        "OPEN_SETUP",
-    }
+    dashboard_path = Path(__file__).resolve().parents[1] / "dashboard" / "bat_dashboard_app.py"
+    dashboard_actions = literal_string_set(dashboard_path, "DASHBOARD_COMMAND_TYPES")
+    dashboard_source = dashboard_path.read_text(encoding="utf-8")
+
     assert bat_server.ALLOWED_COMMAND_TYPES == bat_server_contract.ALLOWED_COMMAND_TYPES
     assert bat_server.ALLOWED_COMMAND_TYPES == dashboard_actions
+    assert "Custom command type" not in dashboard_source
+    assert "Queue custom command" not in dashboard_source
 
 
 def test_admin_command_endpoint_rejects_unsupported_commands(tmp_path: Path):
