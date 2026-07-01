@@ -1197,7 +1197,7 @@ def page_nodes(nodes: pd.DataFrame) -> None:
             cid = queue_command(selected, "MOTH_LIST")
             st.success(f"SD list queued as command #{cid}.")
     with col_e:
-        if st.button("Test UART", width="stretch", help="Measure the 921600-baud AudioMoth-to-ESP stream path"):
+        if st.button("Test UART", width="stretch", help="Benchmark the AudioMoth-to-ESP stream path and report the highest stable baud"):
             cid = queue_command(selected, "MOTH_TEST_STREAM")
             st.success(f"UART test queued as command #{cid}.")
     with col_f:
