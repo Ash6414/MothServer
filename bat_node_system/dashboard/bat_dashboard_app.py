@@ -1229,11 +1229,6 @@ def page_nodes(nodes: pd.DataFrame) -> None:
 
     if is_advanced_mode():
         st.divider()
-        custom = st.text_input("Custom command type", placeholder="Example: FORCE_MANIFEST")
-        if st.button("Queue custom command", disabled=not bool(custom)):
-            cid = queue_command(selected, custom)
-            st.success(f"Queued {custom.upper()} command #{cid}.")
-
         with st.expander("Raw current state"):
             st.json(row.dropna().to_dict())
 

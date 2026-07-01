@@ -109,10 +109,11 @@ def test_public_gateway_exposes_devices_not_admin():
     assert not gateway_policy.is_public_device_path("/v1/provision/node")
 
 
-def test_contract_command_allowlist_matches_dashboard_actions():
+def test_command_allowlists_match_runtime_contract_and_dashboard_actions():
+    import bat_server
     import bat_server_contract
 
-    assert {
+    dashboard_actions = {
         "PING",
         "UPLOAD_NOW",
         "SYNC_MOTH_TIME",
@@ -120,7 +121,35 @@ def test_contract_command_allowlist_matches_dashboard_actions():
         "MOTH_LIST",
         "MOTH_TEST_STREAM",
         "OPEN_SETUP",
-    }.issubset(bat_server_contract.ALLOWED_COMMAND_TYPES)
+    }
+    assert bat_server.ALLOWED_COMMAND_TYPES == bat_server_contract.ALLOWED_COMMAND_TYPES
+    assert bat_server.ALLOWED_COMMAND_TYPES == dashboard_actions
+
+
+def test_admin_command_endpoint_rejects_unsupported_commands(tmp_path: Path):
+    client = build_client(tmp_path)
+    response = client.post(
+        f"/admin/commands/{NODE_ID}/FORCE_MANIFEST",
+        auth=("admin", "test-dashboard-password"),
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "unsupported command type"
+
+
+def test_admin_command_endpoint_queues_supported_commands_uppercase(tmp_path: Path):
+    client = build_client(tmp_path)
+    response = client.post(
+        f"/admin/commands/{NODE_ID}/moth_status",
+        auth=("admin", "test-dashboard-password"),
+    )
+    assert response.status_code == 200
+    command_id = response.json()["command_id"]
+
+    import bat_server
+
+    with bat_server.db_connect() as conn:
+        row = conn.execute("SELECT command_type FROM commands WHERE id=?", (command_id,)).fetchone()
+    assert row["command_type"] == "MOTH_STATUS"
 
 
 def test_provision_node_creates_hmac_credentials(tmp_path: Path):

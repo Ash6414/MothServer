@@ -49,6 +49,15 @@ COMMAND_REDELIVER_AFTER_SECONDS = max(30, int(os.getenv("COMMAND_REDELIVER_AFTER
 PROVISIONING_TOKEN = os.getenv("PROVISIONING_TOKEN", "").strip()
 ENROLLMENT_TTL_SECONDS = int(os.getenv("ENROLLMENT_TTL_SECONDS", "1800"))
 ENROLLMENT_POLL_SECONDS = max(2, int(os.getenv("ENROLLMENT_POLL_SECONDS", "3")))
+ALLOWED_COMMAND_TYPES = {
+    "PING",
+    "UPLOAD_NOW",
+    "SYNC_MOTH_TIME",
+    "MOTH_STATUS",
+    "MOTH_LIST",
+    "MOTH_TEST_STREAM",
+    "OPEN_SETUP",
+}
 
 ADMIN_USER = os.getenv("DASHBOARD_USER", "admin")
 ADMIN_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "change-me-now")
@@ -2300,6 +2309,9 @@ async def admin_compress_recordings(
 def admin_queue_command(node_id: str, command_type: str, request: Request, admin: str = Depends(require_admin)) -> Dict[str, Any]:
     t = now_epoch()
     payload = {}
+    command_type = command_type.upper()
+    if command_type not in ALLOWED_COMMAND_TYPES:
+        raise HTTPException(status_code=400, detail="unsupported command type")
     with db_connect() as conn:
         node = conn.execute("SELECT node_id FROM nodes WHERE node_id=?", (node_id,)).fetchone()
         if not node:
@@ -2309,7 +2321,7 @@ def admin_queue_command(node_id: str, command_type: str, request: Request, admin
             INSERT INTO commands (node_id, command_type, payload_json, status, created_at, expires_at)
             VALUES (?, ?, ?, 'PENDING', ?, ?)
             """,
-            (node_id, command_type.upper(), json.dumps(payload), t, t + 24 * 3600),
+            (node_id, command_type, json.dumps(payload), t, t + 24 * 3600),
         )
         conn.commit()
         command_id = cur.lastrowid
