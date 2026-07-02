@@ -516,71 +516,72 @@ def test_upload_accepts_esp_128k_production_chunks(tmp_path: Path):
         assert response.json()["bytes_received"] == min((index + 1) * chunk_size, len(payload))
 
 
-def test_upload_init_supersedes_old_chunk_size_and_removes_temp_file(tmp_path: Path):
+def test_upload_init_supersedes_changed_chunk_size_and_removes_temp_file(tmp_path: Path):
     client = build_client(tmp_path)
-    manifest_id = f"{NODE_ID}-RESIZE-CHUNK"
-    local_file_id = 128002
-    filename = "resize-transfer.bin"
-    file_size = 192 * 1024
-
-    manifest = post_json(
-        client,
-        "/v1/files/manifest",
-        {
-            "node_id": NODE_ID,
-            "manifest_id": manifest_id,
-            "sd_card_id": "AudioMoth",
-            "files": [
-                {
-                    "local_file_id": local_file_id,
-                    "filename": filename,
-                    "file_size_bytes": file_size,
-                }
-            ],
-        },
-    )
-    assert manifest.status_code == 200
-
-    first = post_json(
-        client,
-        "/v1/uploads/init",
-        {
-            "manifest_id": manifest_id,
-            "local_file_id": local_file_id,
-            "filename": filename,
-            "file_size_bytes": file_size,
-            "chunk_size": 64 * 1024,
-        },
-    )
-    assert first.status_code == 200
-    first_upload_id = first.json()["upload_id"]
-
     import bat_server
 
-    with bat_server.db_connect() as conn:
-        row = conn.execute("SELECT temp_path FROM upload_sessions WHERE upload_id=?", (first_upload_id,)).fetchone()
-    old_temp = Path(row["temp_path"])
-    assert old_temp.exists()
+    for index, (first_chunk, second_chunk) in enumerate(((64 * 1024, 128 * 1024), (128 * 1024, 64 * 1024))):
+        manifest_id = f"{NODE_ID}-RESIZE-CHUNK-{index}"
+        local_file_id = 128002 + index
+        filename = f"resize-transfer-{index}.bin"
+        file_size = 192 * 1024
 
-    second = post_json(
-        client,
-        "/v1/uploads/init",
-        {
-            "manifest_id": manifest_id,
-            "local_file_id": local_file_id,
-            "filename": filename,
-            "file_size_bytes": file_size,
-            "chunk_size": 128 * 1024,
-        },
-    )
-    assert second.status_code == 200
-    assert second.json()["upload_id"] != first_upload_id
-    assert second.json()["chunk_size"] == 128 * 1024
+        manifest = post_json(
+            client,
+            "/v1/files/manifest",
+            {
+                "node_id": NODE_ID,
+                "manifest_id": manifest_id,
+                "sd_card_id": "AudioMoth",
+                "files": [
+                    {
+                        "local_file_id": local_file_id,
+                        "filename": filename,
+                        "file_size_bytes": file_size,
+                    }
+                ],
+            },
+        )
+        assert manifest.status_code == 200
 
-    with bat_server.db_connect() as conn:
-        row = conn.execute("SELECT status FROM upload_sessions WHERE upload_id=?", (first_upload_id,)).fetchone()
-    assert row["status"] == "SUPERSEDED"
-    assert not old_temp.exists()
+        first = post_json(
+            client,
+            "/v1/uploads/init",
+            {
+                "manifest_id": manifest_id,
+                "local_file_id": local_file_id,
+                "filename": filename,
+                "file_size_bytes": file_size,
+                "chunk_size": first_chunk,
+            },
+        )
+        assert first.status_code == 200
+        first_upload_id = first.json()["upload_id"]
+
+        with bat_server.db_connect() as conn:
+            row = conn.execute("SELECT temp_path FROM upload_sessions WHERE upload_id=?", (first_upload_id,)).fetchone()
+        old_temp = Path(row["temp_path"])
+        assert old_temp.exists()
+
+        second = post_json(
+            client,
+            "/v1/uploads/init",
+            {
+                "manifest_id": manifest_id,
+                "local_file_id": local_file_id,
+                "filename": filename,
+                "file_size_bytes": file_size,
+                "chunk_size": second_chunk,
+            },
+        )
+        assert second.status_code == 200
+        assert second.json()["upload_id"] != first_upload_id
+        assert second.json()["chunk_size"] == second_chunk
+
+        with bat_server.db_connect() as conn:
+            row = conn.execute("SELECT status FROM upload_sessions WHERE upload_id=?", (first_upload_id,)).fetchone()
+        assert row["status"] == "SUPERSEDED"
+        assert not old_temp.exists()
 
 
 def test_make_flac_uses_flac_cli_when_available(tmp_path: Path, monkeypatch):
