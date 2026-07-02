@@ -462,12 +462,12 @@ def test_upload_init_rejects_bad_chunk_size(tmp_path: Path):
     assert response.status_code == 400
 
 
-def test_upload_accepts_esp_64k_chunks(tmp_path: Path):
+def test_upload_accepts_esp_128k_production_chunks(tmp_path: Path):
     client = build_client(tmp_path)
-    chunk_size = 64 * 1024
+    chunk_size = 128 * 1024
     payload = b"A" * chunk_size + b"tail"
     manifest_id = f"{NODE_ID}-FAST-CHUNK"
-    local_file_id = 64001
+    local_file_id = 128001
     filename = "fast-transfer.bin"
 
     manifest = post_json(
@@ -513,6 +513,7 @@ def test_upload_accepts_esp_64k_chunks(tmp_path: Path):
         )
         assert response.status_code == 200
         assert response.json()["server_ms"] >= 0
+        assert response.json()["bytes_received"] == min((index + 1) * chunk_size, len(payload))
 
 
 def test_make_flac_uses_flac_cli_when_available(tmp_path: Path, monkeypatch):
