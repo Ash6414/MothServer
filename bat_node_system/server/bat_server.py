@@ -268,8 +268,11 @@ def catalog_recording(conn: sqlite3.Connection, file_id: int, rename_files: bool
         target_wav = current_wav.with_name(canonical_name)
         if current_wav.exists() and current_wav != target_wav:
             if target_wav.exists():
-                raise RuntimeError(f"Canonical recording already exists: {target_wav}")
-            current_wav.replace(target_wav)
+                original_wav_path = str(target_wav)
+            else:
+                current_wav.replace(target_wav)
+                original_wav_path = str(target_wav)
+        if original_wav_path == str(target_wav) and current_wav != target_wav:
             original_wav_path = str(target_wav)
             recordings_table = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recordings'"
@@ -292,8 +295,11 @@ def catalog_recording(conn: sqlite3.Connection, file_id: int, rename_files: bool
             target_flac = current_flac.with_name(Path(canonical_name).with_suffix(".flac").name)
             if current_flac.exists() and current_flac != target_flac:
                 if target_flac.exists():
-                    raise RuntimeError(f"Canonical FLAC already exists: {target_flac}")
-                current_flac.replace(target_flac)
+                    flac_path = str(target_flac)
+                else:
+                    current_flac.replace(target_flac)
+                    flac_path = str(target_flac)
+            if flac_path == str(target_flac):
                 flac_path = str(target_flac)
 
     conn.execute(

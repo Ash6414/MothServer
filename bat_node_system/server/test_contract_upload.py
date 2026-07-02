@@ -647,6 +647,49 @@ def test_catalog_falls_back_to_upload_day_for_unusual_filename(tmp_path: Path):
     assert row["recorded_at_source"] == "upload_day_fallback"
 
 
+def test_catalog_backfill_adopts_existing_canonical_file(tmp_path: Path):
+    build_client(tmp_path)
+    import bat_server
+
+    created_at = 1781827200
+    node_dir = tmp_path / "data" / "original_wav" / NODE_ID
+    node_dir.mkdir(parents=True, exist_ok=True)
+    old_path = node_dir / "old-name.WAV"
+    old_path.write_bytes(b"old duplicate")
+
+    with bat_server.db_connect() as conn:
+        conn.execute(
+            "INSERT INTO manifests (manifest_id, node_id, created_at, updated_at, raw_json) VALUES ('canonical-manifest', ?, ?, ?, '{}')",
+            (NODE_ID, created_at, created_at),
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO files (
+                node_id, manifest_id, filename, file_size_bytes, upload_status,
+                original_wav_path, created_at, updated_at
+            ) VALUES (?, 'canonical-manifest', 'odd-name.WAV', ?, 'SERVER_COPY_VERIFIED',
+                      ?, ?, ?)
+            """,
+            (NODE_ID, old_path.stat().st_size, str(old_path), created_at, created_at),
+        )
+        file_id = int(cur.lastrowid)
+        canonical_name = f"{NODE_ID}_UPLOADED_20260619_{file_id:06d}.WAV"
+        canonical_path = node_dir / canonical_name
+        canonical_path.write_bytes(b"canonical copy")
+
+        bat_server.catalog_recording(conn, file_id, rename_files=True)
+        row = conn.execute(
+            "SELECT canonical_name, original_wav_path FROM files WHERE id=?",
+            (file_id,),
+        ).fetchone()
+        conn.commit()
+
+    assert row["canonical_name"] == canonical_name
+    assert row["original_wav_path"] == str(canonical_path)
+    assert canonical_path.exists()
+    assert old_path.exists()
+
+
 def test_reconcile_compresses_missed_verified_wav(tmp_path: Path, monkeypatch):
     build_client(tmp_path)
     import bat_server
