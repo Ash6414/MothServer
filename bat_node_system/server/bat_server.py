@@ -136,6 +136,22 @@ def safe_join(root: Path, *parts: str) -> Path:
     return candidate
 
 
+def remove_superseded_upload_temp(path_value: Any) -> None:
+    if not path_value:
+        return
+    try:
+        path = Path(str(path_value)).resolve()
+        path.relative_to(INCOMING_DIR.resolve())
+    except (OSError, ValueError):
+        return
+    if path.suffix != ".part":
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def sanitize_filename(filename: str) -> str:
     # Keep directory structure out of node-provided names.
     name = Path(filename).name.strip()
@@ -1483,6 +1499,7 @@ async def upload_init(request: Request) -> Dict[str, Any]:
                     "UPDATE upload_sessions SET status='SUPERSEDED', updated_at=? WHERE upload_id=?",
                     (t, existing["upload_id"]),
                 )
+                remove_superseded_upload_temp(existing["temp_path"])
             upload_id = "UPL_" + uuid.uuid4().hex
             chunk_size = min(requested_chunk_size, MAX_CHUNK_SIZE)
             total_chunks = math.ceil(file_size / chunk_size)
